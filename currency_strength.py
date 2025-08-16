@@ -3,11 +3,12 @@ import time
 from config import PAIRS, OANDA_API, HEADERS
 from utils import get_recent_candles, rsi, ema_slope, atr, send_telegram
 
+# Configure logging for module use
 logging.basicConfig(level=logging.INFO)
-
 CURRENCIES = ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "NZD", "CAD"]
 
 def calculate_strength(oanda_api, headers):
+    """Calculate currency strength scores and rank currencies."""
     scores = {c: [] for c in CURRENCIES}
 
     for pair in PAIRS:
@@ -62,15 +63,14 @@ def calculate_strength(oanda_api, headers):
 
     return rank_map
 
-
 def format_strength_alert(rank_map):
+    """Return a nicely formatted currency strength alert string."""
     msg = "📊 Currency Strength Alert 📊\n"
     msg += "Currency Strength Rankings (from +7 strongest to -7 weakest):\n"
     for cur, rank in sorted(rank_map.items(), key=lambda x: x[1], reverse=True):
         sign = "+" if rank > 0 else ""
         msg += f"{cur}: {sign}{rank}\n"
     return msg
-
 
 def run_currency_strength_alert(oanda_api, headers, last_alert_time=None, cooldown=14400):
     """
@@ -97,28 +97,22 @@ def run_currency_strength_alert(oanda_api, headers, last_alert_time=None, cooldo
     logging.warning("Failed to send currency strength alert")
     return last_alert_time
 
+# ===================== Standalone test =====================
+if __name__ == "__main__":
+    last_strength_alert_time = None
+    STRENGTH_ALERT_COOLDOWN = 14400  # 4 hours
 
-# ===================== MAIN LOOP =====================
+    logging.info("Currency Strength bot standalone test started!")
 
-last_strength_alert_time = None
-STRENGTH_ALERT_COOLDOWN = 14400  # 4 hours
-
-logging.info("Alert bot started! Scheduler running...")
-
-while True:
-    try:
-        logging.info(f"Checking signals at {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC")
-
-        last_strength_alert_time = run_currency_strength_alert(
-            oanda_api=OANDA_API,
-            headers=HEADERS,
-            last_alert_time=last_strength_alert_time,
-            cooldown=STRENGTH_ALERT_COOLDOWN
-        )
-
-        # Wait 60 seconds before next loop check
-        time.sleep(60)
-
-    except Exception as e:
-        logging.error(f"Unexpected error in main loop: {e}")
-        time.sleep(60)
+    while True:
+        try:
+            last_strength_alert_time = run_currency_strength_alert(
+                oanda_api=OANDA_API,
+                headers=HEADERS,
+                last_alert_time=last_strength_alert_time,
+                cooldown=STRENGTH_ALERT_COOLDOWN
+            )
+            time.sleep(60)
+        except Exception as e:
+            logging.error(f"Unexpected error in standalone loop: {e}")
+            time.sleep(60)
