@@ -64,7 +64,13 @@ while True:
                 logging.warning(f"[Breakout] H1 breakout alert sent for pairs: {', '.join(breakout_pairs)}")
 
         # --- Group Breakout Alerts ---
+        # Only send alerts if min_pairs break out
         last_group_alerts = run_group_breakout_alert(last_group_alerts, min_pairs=3)
+
+        # Log only actual alerts that meet min_pairs
+        for currency, breakout_pairs in last_group_alerts.items():
+            if len(breakout_pairs) >= 3:
+                logging.warning(f"✅ Sent {currency} breakout alert: {', '.join(breakout_pairs)}")
 
         # --- Forex News Alerts ---
         events = fetch_forexfactory_events()
