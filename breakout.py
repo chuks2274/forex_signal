@@ -5,7 +5,9 @@ from utils import get_recent_candles, send_telegram
 from config import PAIRS, ALERT_COOLDOWN, OANDA_API, OANDA_TOKEN, OANDA_ACCOUNT
 
 # --- Configure logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger("breakout")
+logger.setLevel(logging.WARNING)  # only warnings/errors
+logging.basicConfig(format='%(asctime)s [%(levelname)s] %(message)s')
 
 # --- Define currency groups ---
 CURRENCY_GROUPS = {
@@ -25,7 +27,6 @@ def check_breakout_yesterday(pair):
     try:
         daily_candles = get_recent_candles(pair, "D", 2)
         if not daily_candles or len(daily_candles) < 2:
-            logging.info(f"{pair} - Not enough daily candles to check breakout.")
             return False
 
         prev_high = float(daily_candles[-2]['mid']['h'])
@@ -33,40 +34,38 @@ def check_breakout_yesterday(pair):
 
         h1_candles = get_recent_candles(pair, "H1", 1)
         if not h1_candles:
-            logging.info(f"{pair} - No H1 candles to check current price.")
             return False
 
         current_price = float(h1_candles[-1]['mid']['c'])
-        breakout = current_price > prev_high or current_price < prev_low
-        logging.info(f"{pair} - Current: {current_price}, Yesterday H/L: {prev_high}/{prev_low}, Breakout: {breakout}")
-        return breakout
+        return current_price > prev_high or current_price < prev_low
 
     except Exception as e:
-        logging.error(f"Error checking breakout for {pair}: {e}")
+        logger.error(f"Error checking breakout for {pair}: {e}")
         return False
 
 def check_breakout_h1(pair):
-    """Check if H1 breakout happened."""
+    """Return True if current H1 candle is outside its own H/L."""
     try:
         candles = get_recent_candles(pair, "H1", 1)
         if not candles:
-            logging.info(f"[H1] {pair} - No H1 candles available")
             return False
         current_price = float(candles[-1]['mid']['c'])
         high = float(candles[-1]['mid']['h'])
         low = float(candles[-1]['mid']['l'])
-        breakout = current_price > high or current_price < low
-        logging.info(f"[H1] {pair} - Current: {current_price}, H/L: {high}/{low}, Breakout: {breakout}")
-        return breakout
+        return current_price > high or current_price < low
     except Exception as e:
-        logging.error(f"[H1] {pair} - Error: {e}")
+        logger.error(f"[H1] {pair} - Error: {e}")
         return False
 
 def run_group_breakout_alert(last_group_alerts, min_pairs=3):
-    """Send alert once per currency group per day if enough pairs break yesterday's high/low."""
+    """
+    Checks all currencies for group breakouts.
+    Returns a dict of {currency: [pairs_that_triggered_alert]}.
+    Only pairs that actually meet min_pairs are included.
+    """
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     today_date = now_utc.date()
-    logging.info("Checking group breakout alerts...")
+    group_alerts = {}
 
     for group, pairs in CURRENCY_GROUPS.items():
         breakout_pairs = [pair for pair in pairs if check_breakout_yesterday(pair)]
@@ -79,15 +78,11 @@ def run_group_breakout_alert(last_group_alerts, min_pairs=3):
                     + "\n".join(sorted(breakout_pairs))
                 )
                 if send_telegram(alert_msg):
-                    logging.info(f"✅ Sent {group} breakout alert: {', '.join(breakout_pairs)}")
+                    logger.warning(f"✅ Sent {group} breakout alert: {', '.join(breakout_pairs)}")
+                    group_alerts[group] = breakout_pairs
                     last_group_alerts[group] = today_date
-                else:
-                    logging.warning(f"⚠️ Failed to send {group} breakout alert.")
-        else:
-            logging.info(f"{group} - Not enough breakouts ({len(breakout_pairs)}) to send alert.")
 
-    logging.info("Group breakout check completed.")
-    return last_group_alerts
+    return group_alerts
 
 # --- OANDA market check ---
 def is_market_open_oanda(instrument="EUR_USD"):
@@ -98,39 +93,22 @@ def is_market_open_oanda(instrument="EUR_USD"):
 
     try:
         response = requests.get(url, headers=headers, params=params, timeout=10)
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-
-        if response.status_code == 200:
-            data = response.json()
-            candles = data.get("candles", [])
-            if candles:
-                logging.info(f"[{now_utc.isoformat()}] OANDA market open for {instrument}")
-                return True
-            else:
-                logging.info(f"[{now_utc.isoformat()}] No recent candles for {instrument}, market likely closed")
-        else:
-            logging.warning(f"[{now_utc.isoformat()}] OANDA API response {response.status_code} for {instrument}")
-        return False
-
+        if response.status_code != 200:
+            logger.warning(f"OANDA API response {response.status_code} for {instrument}")
+            return False
+        data = response.json()
+        return bool(data.get("candles", []))
     except Exception as e:
-        logging.error(f"[{datetime.datetime.now(datetime.timezone.utc).isoformat()}] Error checking OANDA market: {e}")
+        logger.error(f"Error checking OANDA market: {e}")
         return False
 
 # --- Standalone test ---
 if __name__ == "__main__":
-    logging.info("Standalone breakout test starting...")
-    last_breakout_alert_times = {}
-    breakout_pairs = []
-
-    for pair in PAIRS:
-        try:
-            yest_breakout = check_breakout_yesterday(pair)
-            h1_breakout = check_breakout_h1(pair)
-            logging.info(f"{pair} - Yesterday breakout: {yest_breakout}, H1 breakout: {h1_breakout}")
-            if yest_breakout or h1_breakout:
-                last_breakout_alert_times[pair] = datetime.datetime.now(datetime.timezone.utc)
-                breakout_pairs.append(pair)
-        except Exception as e:
-            logging.error(f"Error checking breakout for {pair}: {e}")
-
-    logging.info(f"Standalone breakout test completed. Pairs detected: {breakout_pairs}")
+    logger.warning("Standalone breakout test starting...")
+    last_group_alerts = {}
+    breakout_results = run_group_breakout_alert(last_group_alerts, min_pairs=3)
+    if breakout_results:
+        for currency, pairs in breakout_results.items():
+            logger.warning(f"Standalone test alert sent: {currency} -> {', '.join(pairs)}")
+    else:
+        logger.warning("Standalone test: No breakout alerts detected.")
