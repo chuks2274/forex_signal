@@ -1,5 +1,7 @@
 import requests
 import logging
+import pytz
+from datetime import datetime
 
 from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, OANDA_API, HEADERS
 
@@ -111,3 +113,23 @@ def ema_slope(closes, period=10):
     ema_series = series.ewm(span=period, adjust=False).mean()
     slope = ema_series.iloc[-1] - ema_series.iloc[-2]
     return slope
+
+# ================= SESSION DETECTION =================
+def get_current_session(now_utc=None):
+    """
+    Return the current trading session (Asian, London, or New York)
+    based on New York local time.
+    """
+    if now_utc is None:
+        now_utc = datetime.utcnow()
+
+    ny_tz = pytz.timezone("America/New_York")
+    now_ny = now_utc.replace(tzinfo=pytz.utc).astimezone(ny_tz)
+    hour = now_ny.hour
+
+    if 0 <= hour < 8:
+        return "Asian"
+    elif 8 <= hour < 16:
+        return "London"
+    else:
+        return "NewYork"

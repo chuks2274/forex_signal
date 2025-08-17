@@ -1,16 +1,17 @@
 import logging
 import datetime
+import time
 import requests
 from utils import get_recent_candles, send_telegram
 from config import PAIRS, ALERT_COOLDOWN, OANDA_API, OANDA_TOKEN, OANDA_ACCOUNT
 
 # --- Configure logging ---
 logger = logging.getLogger("breakout")
-logger.setLevel(logging.WARNING)  # only warnings/errors
+logger.setLevel(logging.WARNING)
 logging.basicConfig(format='%(asctime)s [%(levelname)s] %(message)s')
 
-# --- Define currency groups ---
-CURRENCY_GROUPS = {
+# --- Define currency groups, filtered to PAIRS ---
+RAW_CURRENCY_GROUPS = {
     "USD": ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "NZD_USD", "USD_CAD", "USD_CHF"],
     "EUR": ["EUR_USD", "EUR_GBP", "EUR_JPY", "EUR_AUD", "EUR_CAD", "EUR_NZD"],
     "GBP": ["GBP_USD", "EUR_GBP", "GBP_JPY", "GBP_AUD", "GBP_CAD", "GBP_NZD"],
@@ -20,6 +21,11 @@ CURRENCY_GROUPS = {
     "CAD": ["USD_CAD", "EUR_CAD", "GBP_CAD", "AUD_CAD", "NZD_CAD", "CAD_JPY", "CAD_CHF"],
     "CHF": ["USD_CHF", "EUR_CHF", "GBP_CHF", "AUD_CHF", "NZD_CHF", "CAD_CHF", "CHF_JPY"],
 }
+
+CURRENCY_GROUPS = {cur: [p for p in pairs if p in PAIRS] for cur, pairs in RAW_CURRENCY_GROUPS.items()}
+
+# --- Persistent alert storage ---
+last_group_alerts = {}  # {currency: float timestamp} persists across restarts
 
 # --- Breakout functions ---
 def check_breakout_yesterday(pair):
@@ -44,34 +50,40 @@ def check_breakout_yesterday(pair):
         return False
 
 def check_breakout_h1(pair):
-    """Return True if current H1 candle is outside its own H/L."""
+    """Return True if the latest H1 close breaks above the previous candle's high or below its low."""
     try:
-        candles = get_recent_candles(pair, "H1", 1)
-        if not candles:
+        candles = get_recent_candles(pair, "H1", 2)
+        if not candles or len(candles) < 2:
             return False
-        current_price = float(candles[-1]['mid']['c'])
-        high = float(candles[-1]['mid']['h'])
-        low = float(candles[-1]['mid']['l'])
-        return current_price > high or current_price < low
+
+        prev_high = float(candles[-2]['mid']['h'])
+        prev_low = float(candles[-2]['mid']['l'])
+        last_close = float(candles[-1]['mid']['c'])
+
+        return last_close > prev_high or last_close < prev_low
+
     except Exception as e:
         logger.error(f"[H1] {pair} - Error: {e}")
         return False
 
-def run_group_breakout_alert(last_group_alerts, min_pairs=3):
+def run_group_breakout_alert(min_pairs=3):
     """
-    Checks all currencies for group breakouts.
+    Checks all currencies for group breakouts with ALERT_COOLDOWN.
     Returns a dict of {currency: [pairs_that_triggered_alert]}.
-    Only pairs that actually meet min_pairs are included.
+    Uses persistent last_group_alerts so restarts won't spam alerts.
     """
+    global last_group_alerts  # always refer to module-level persistent dict
+
+    now_ts = time.time()
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    today_date = now_utc.date()
     group_alerts = {}
 
     for group, pairs in CURRENCY_GROUPS.items():
         breakout_pairs = [pair for pair in pairs if check_breakout_yesterday(pair)]
         if len(breakout_pairs) >= min_pairs:
-            last_alert_date = last_group_alerts.get(group)
-            if last_alert_date != today_date:
+            last_alert_ts = last_group_alerts.get(group, 0)
+
+            if now_ts - last_alert_ts >= ALERT_COOLDOWN:
                 alert_msg = (
                     f"📢 {group} Group Breakout Alert! ({len(breakout_pairs)} pairs) - "
                     f"{now_utc.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
@@ -80,7 +92,7 @@ def run_group_breakout_alert(last_group_alerts, min_pairs=3):
                 if send_telegram(alert_msg):
                     logger.warning(f"✅ Sent {group} breakout alert: {', '.join(breakout_pairs)}")
                     group_alerts[group] = breakout_pairs
-                    last_group_alerts[group] = today_date
+                    last_group_alerts[group] = now_ts  # persist timestamp
 
     return group_alerts
 
@@ -105,10 +117,11 @@ def is_market_open_oanda(instrument="EUR_USD"):
 # --- Standalone test ---
 if __name__ == "__main__":
     logger.warning("Standalone breakout test starting...")
-    last_group_alerts = {}
-    breakout_results = run_group_breakout_alert(last_group_alerts, min_pairs=3)
-    if breakout_results:
-        for currency, pairs in breakout_results.items():
-            logger.warning(f"Standalone test alert sent: {currency} -> {', '.join(pairs)}")
-    else:
-        logger.warning("Standalone test: No breakout alerts detected.")
+    while True:
+        breakout_results = run_group_breakout_alert(min_pairs=3)
+        if breakout_results:
+            for currency, pairs in breakout_results.items():
+                logger.warning(f"Standalone test alert sent: {currency} -> {', '.join(pairs)}")
+        else:
+            logger.warning("Standalone test: No breakout alerts detected.")
+        time.sleep(60)

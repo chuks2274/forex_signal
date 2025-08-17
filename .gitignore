@@ -21,3 +21,5 @@ Thumbs.db
 # IDE/project files
 .vscode/
 .idea/
+
+trade_alerts.json

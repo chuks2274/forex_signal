@@ -1,59 +1,57 @@
+# currency_strength.py
 import logging
 import time
-from config import PAIRS, OANDA_API, HEADERS
+from config import PAIRS, OANDA_API, HEADERS, STRENGTH_ALERT_COOLDOWN
 from utils import get_recent_candles, rsi, ema_slope, atr, send_telegram
 
 # Configure logging for module use
+logger = logging.getLogger("forex_bot")
 logging.basicConfig(level=logging.INFO)
+
+# All currencies to track (base/quote)
 CURRENCIES = ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "NZD", "CAD"]
 
+# ===================== Core strength calculation =====================
 def calculate_strength(oanda_api, headers):
     """Calculate currency strength scores and rank currencies."""
     scores = {c: [] for c in CURRENCIES}
 
     for pair in PAIRS:
-        base, quote = pair.split("_")
+        if "_" not in pair:
+            logger.warning(f"Invalid pair format skipped: {pair}")
+            continue
 
-        # Get recent H4 candles
+        base, quote = pair.split("_")
+        if base not in CURRENCIES or quote not in CURRENCIES:
+            continue
+
         candles = get_recent_candles(pair, granularity="H4", count=20)
         if not candles:
-            logging.warning(f"No candles returned for {pair}")
+            logger.warning(f"No candles returned for {pair}")
             continue
 
         closes = [float(c["mid"]["c"]) for c in candles]
-
-        # Price % change
         price_change = ((closes[-1] - closes[-2]) / closes[-2]) * 100 if len(closes) >= 2 else 0
-
-        # RSI
         rsi_values = rsi(closes)
         rsi_val = rsi_values[-1] if rsi_values else 0
-
-        # EMA slope
         ema_trend = ema_slope(closes)
-
-        # ATR
         atr_val = atr(candles) or 0
 
-        # Weighted score
         w_price, w_rsi, w_ema, w_atr = 0.4, 0.3, 0.2, 0.1
         norm_rsi = (rsi_val - 50) / 50
-
         score_base = w_price * price_change + w_rsi * norm_rsi * 100 + w_ema * ema_trend * 100 + w_atr * atr_val
 
         scores[base].append(score_base)
         scores[quote].append(-score_base)
 
-    # Compute average scores
     avg_scores = {}
     for cur, vals in scores.items():
         if vals:
             try:
                 avg_scores[cur] = sum(vals) / len(vals)
             except Exception as e:
-                logging.error(f"Error calculating average for {cur}: {e}")
+                logger.error(f"Error calculating average for {cur}: {e}")
 
-    # Rank from +7 strongest to -7 weakest
     sorted_scores = sorted(avg_scores.items(), key=lambda x: x[1], reverse=True)
     n = len(CURRENCIES)
     rank_map = {}
@@ -63,6 +61,7 @@ def calculate_strength(oanda_api, headers):
 
     return rank_map
 
+# ===================== Format alert =====================
 def format_strength_alert(rank_map):
     """Return a nicely formatted currency strength alert string."""
     msg = "📊 Currency Strength Alert 📊\n"
@@ -72,47 +71,72 @@ def format_strength_alert(rank_map):
         msg += f"{cur}: {sign}{rank}\n"
     return msg
 
-def run_currency_strength_alert(oanda_api, headers, last_alert_time=None, cooldown=14400):
+# ===================== Alert function (timestamp-based) =====================
+def run_currency_strength_alert(oanda_api, headers, last_alert_time=None, cooldown=STRENGTH_ALERT_COOLDOWN, threshold=5):
     """
     Runs the currency strength alert if cooldown has passed.
-    Cooldown default = 4 hours (14400 seconds)
+    Uses timestamps for cooldown tracking (full uniformity with breakout alerts).
+    Returns a dictionary of alerted currencies and the updated last_alert_time.
     """
     now_ts = time.time()
-    if last_alert_time and (now_ts - last_alert_time) < cooldown:
-        remaining = cooldown - (now_ts - last_alert_time)
-        logging.info(f"Skipping currency strength alert. Cooldown remaining: {remaining/60:.1f} minutes")
-        return last_alert_time
+    last_ts = last_alert_time or 0
 
-    rank_map = calculate_strength(oanda_api, headers)
-    if not rank_map:
-        logging.warning("No rank map calculated for currency strength alert")
-        return last_alert_time
+    if now_ts - last_ts < cooldown:
+        remaining = cooldown - (now_ts - last_ts)
+        logger.info(f"Skipping currency strength alert. Cooldown remaining: {remaining/60:.1f} minutes")
+        return {}, last_ts
 
-    alert_msg = format_strength_alert(rank_map)
+    try:
+        rank_map = calculate_strength(oanda_api, headers)
+        if not rank_map:
+            logger.warning("No rank map calculated for currency strength alert")
+            return {}, last_ts
 
-    if send_telegram(alert_msg):
-        logging.info("Sent currency strength alert")
-        return now_ts
+        alerted_currencies = {cur: val for cur, val in rank_map.items() if abs(val) >= threshold}
 
-    logging.warning("Failed to send currency strength alert")
-    return last_alert_time
+        if alerted_currencies:
+            alert_msg = format_strength_alert(rank_map)
+            if send_telegram(alert_msg):
+                logger.info(f"✅ Sent currency strength alert: {alerted_currencies}")
+                return alerted_currencies, now_ts
+            else:
+                logger.warning("Failed to send currency strength alert")
+                return alerted_currencies, last_ts
+        else:
+            logger.info("No currencies exceeded the threshold for alert")
+            return {}, last_ts
+
+    except Exception as e:
+        logger.error(f"Error in run_currency_strength_alert: {e}", exc_info=True)
+        return {}, last_ts
 
 # ===================== Standalone test =====================
 if __name__ == "__main__":
     last_strength_alert_time = None
-    STRENGTH_ALERT_COOLDOWN = 14400  # 4 hours
-
-    logging.info("Currency Strength bot standalone test started!")
+    logger.info("Currency Strength bot standalone test started!")
 
     while True:
         try:
-            last_strength_alert_time = run_currency_strength_alert(
+            alerted_currencies, last_strength_alert_time = run_currency_strength_alert(
                 oanda_api=OANDA_API,
                 headers=HEADERS,
                 last_alert_time=last_strength_alert_time,
                 cooldown=STRENGTH_ALERT_COOLDOWN
             )
+            logger.info(f"Alerted currencies this cycle: {alerted_currencies}")
             time.sleep(60)
         except Exception as e:
-            logging.error(f"Unexpected error in standalone loop: {e}")
+            logger.error(f"Unexpected error in standalone loop: {e}")
             time.sleep(60)
+
+# ===================== Helper to get latest strengths =====================
+def get_currency_strength():
+    """
+    Returns the latest currency strength as a dict, for Trade Signal integration.
+    Example: {"EUR": 5, "USD": 2, "GBP": 4, ...}
+    """
+    try:
+        return calculate_strength(OANDA_API, HEADERS)
+    except Exception as e:
+        logger.error(f"Failed to get currency strength: {e}")
+        return {}

@@ -4,88 +4,92 @@ import time
 
 from config import PAIRS, OANDA_API, HEADERS, ALERT_COOLDOWN, STRENGTH_ALERT_COOLDOWN
 from currency_strength import run_currency_strength_alert
-from breakout import check_breakout_h1, run_group_breakout_alert
+from breakout import run_group_breakout_alert  # persistent
 from forex_news_alert import fetch_forexfactory_events
-from utils import send_telegram
+from utils import send_telegram, get_current_session
+from trade_signal import send_trade_signal, select_best_trade_pair, last_trade_alert_times
 
 # ================= SETUP LOGGING =================
 logger = logging.getLogger("forex_bot")
 logger.setLevel(logging.WARNING)  # Only warnings and errors
-logging.basicConfig(format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s")
 
 # ================= LAST ALERT TRACKERS =================
-last_strength_alert_time = None
-last_h1_breakout_alerts = {}     # {pair: datetime}
-last_group_alerts = {}           # {currency: date}
-last_news_alert_times = {}       # {event_key: datetime}
-last_heartbeat = None
+last_strength_alert_time = 0
+last_news_alert_times = {}
+last_heartbeat = 0
 HEARTBEAT_INTERVAL = 24 * 3600  # seconds
 
-# Notify startup
+# ================= STARTUP =================
 logger.warning("Forex alert bot started! Running in PRODUCTION MODE")
 send_telegram("🚀 Forex alert bot started in PRODUCTION MODE")
+
+# ================= HELPER FUNCTIONS =================
+def cleanup_old_session_alerts(current_session):
+    """Remove trade alerts from previous sessions to prevent dict growth."""
+    keys_to_remove = [key for key in last_trade_alert_times if key[1] != current_session]
+    for key in keys_to_remove:
+        del last_trade_alert_times[key]
 
 # ================= MAIN LOOP =================
 while True:
     try:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_ts = time.time()
+        current_session = get_current_session()
 
         # --- Heartbeat ---
-        if last_heartbeat is None or (now_utc - last_heartbeat).total_seconds() >= HEARTBEAT_INTERVAL:
+        if now_ts - last_heartbeat >= HEARTBEAT_INTERVAL:
             heartbeat_msg = f"🫀 Alert bot heartbeat at {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}"
             if send_telegram(heartbeat_msg):
                 logger.warning("[Heartbeat] Sent heartbeat alert")
-            last_heartbeat = now_utc
+            last_heartbeat = now_ts
 
-        # --- Currency Strength Alert (H4, 4h cooldown) ---
-        if last_strength_alert_time is None or (now_utc - last_strength_alert_time).total_seconds() >= STRENGTH_ALERT_COOLDOWN:
-            strength_alert_time = run_currency_strength_alert(
-                oanda_api=OANDA_API,
-                headers=HEADERS,
-                last_alert_time=last_strength_alert_time,
-                cooldown=STRENGTH_ALERT_COOLDOWN
-            )
-            if strength_alert_time and strength_alert_time != last_strength_alert_time:
-                last_strength_alert_time = strength_alert_time
-                logger.warning("[Currency Strength] Alert sent")
-        else:
-            elapsed = (now_utc - last_strength_alert_time).total_seconds()
-            logger.info(f"[Currency Strength] Cooldown active ({elapsed/3600:.2f}h elapsed)")
-
-        # --- H1 Breakout Alerts (pair-level cooldown) ---
-        h1_pairs_to_alert = []
-        for pair in PAIRS:
-            last_alert_time = last_h1_breakout_alerts.get(pair)
-            if last_alert_time is None or (now_utc - last_alert_time).total_seconds() >= ALERT_COOLDOWN:
-                try:
-                    if check_breakout_h1(pair):
-                        h1_pairs_to_alert.append(pair)
-                        last_h1_breakout_alerts[pair] = now_utc
-                except Exception as e:
-                    logger.error(f"[H1 Breakout] Error checking {pair}: {e}", exc_info=True)
-
-        if h1_pairs_to_alert:
-            alert_msg = (
-                f"📢 H1 Breakout Alert! ({len(h1_pairs_to_alert)} pairs) - {now_utc.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-                + "\n".join(sorted(h1_pairs_to_alert))
-            )
-            if send_telegram(alert_msg):
-                logger.warning(f"[H1 Breakout] Alert sent for pairs: {', '.join(h1_pairs_to_alert)}")
+        # --- Currency Strength Alert ---
+        alerted_currencies, last_strength_alert_time = run_currency_strength_alert(
+            oanda_api=OANDA_API,
+            headers=HEADERS,
+            last_alert_time=last_strength_alert_time,
+            cooldown=STRENGTH_ALERT_COOLDOWN,
+            threshold=5
+        )
+        if alerted_currencies:
+            logger.warning(f"[Currency Strength] Alert sent: {alerted_currencies}")
 
         # --- Group Breakout Alerts ---
-        group_alert_results = run_group_breakout_alert(last_group_alerts, min_pairs=3)
-
+        group_alert_results = run_group_breakout_alert(3)
         for currency, breakout_list in group_alert_results.items():
-            if breakout_list and len(breakout_list) >= 3:
-                last_alert_date = last_group_alerts.get(currency)
-                today = now_utc.date()
-                if last_alert_date != today:
-                    if send_telegram(
-                        f"📢 {currency} Group Breakout Alert! ({len(breakout_list)} pairs)\n\n" +
-                        "\n".join(sorted(breakout_list))
-                    ):
-                        logger.warning(f"✅ Sent {currency} breakout alert: {', '.join(breakout_list)}")
-                        last_group_alerts[currency] = today
+            formatted_list = []
+            for p in breakout_list:
+                if p not in PAIRS:
+                    parts = p.split("_")
+                    if len(parts) == 2:
+                        flipped = f"{parts[1]}_{parts[0]}"
+                        if flipped in PAIRS:
+                            formatted_list.append(flipped)
+                else:
+                    formatted_list.append(p)
+
+            if formatted_list and len(formatted_list) >= 3:
+                msg_text = (
+                    f"📢 {currency} Group Breakout Alert! ({len(formatted_list)} pairs)\n\n"
+                    + "\n".join(sorted(formatted_list))
+                )
+                send_telegram(msg_text)
+                logger.warning(f"✅ Sent {currency} breakout alert: {', '.join(sorted(formatted_list))}")
+
+        # --- Trade Signal Alert ---
+        if alerted_currencies:
+            best_signal_result = select_best_trade_pair(alerted_currencies, valid_pairs=PAIRS)
+            if best_signal_result:
+                pair, action, base_strength, quote_strength, session = best_signal_result
+                cleanup_old_session_alerts(session)
+
+                key = (pair, session)
+                if key not in last_trade_alert_times or now_ts - last_trade_alert_times[key] >= ALERT_COOLDOWN:
+                    send_trade_signal(pair, base_strength, quote_strength, session_name=session)
+                    last_trade_alert_times[key] = now_ts
+                    logger.warning(f"[Trade Signal] Sent {action} signal for {pair} (Base {base_strength}, Quote {quote_strength})")
 
         # --- Forex News Alerts ---
         events = fetch_forexfactory_events()
@@ -98,10 +102,10 @@ while True:
                     f"Time: {ev['time'].strftime('%Y-%m-%d %H:%M UTC')}"
                 )
                 if send_telegram(msg):
-                    last_news_alert_times[event_key] = now_utc
+                    last_news_alert_times[event_key] = now_ts
                     logger.warning(f"[News] Alert sent for {ev['currency']} - {ev['event']}")
 
-        # Wait 5 minutes before next check
+        # Wait 5 minutes
         time.sleep(300)
 
     except Exception as e:
