@@ -9,12 +9,11 @@ from forex_news_alert import send_news_alert, fetch_forexfactory_events
 from utils import send_telegram
 
 # ================= SETUP LOGGING =================
-# Only log warnings and errors by default; info-level logs for key events only
+# Only log warnings and errors by default; info-level logs for key events
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s [%(levelname)s] %(message)s')
 
 # ================= LAST ALERT TRACKERS =================
 last_strength_alert_time = None
-last_breakout_alert_times = {}  # per pair
 last_group_alerts = {}          # per currency
 last_news_alert_times = {}      # per event
 last_heartbeat = None
@@ -72,7 +71,6 @@ while True:
         for ev in events:
             event_key = f"{ev['currency']}_{ev['event']}"
             last_sent = last_news_alert_times.get(event_key)
-
             if last_sent:
                 continue  # Skip already sent alerts
 
