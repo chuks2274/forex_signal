@@ -9,7 +9,6 @@ from forex_news_alert import send_news_alert, fetch_forexfactory_events
 from utils import send_telegram
 
 # ================= SETUP LOGGING =================
-# Only log warnings and errors by default; info-level logs for key events
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s [%(levelname)s] %(message)s')
 
 # ================= LAST ALERT TRACKERS =================
@@ -64,13 +63,16 @@ while True:
                 logging.warning(f"[Breakout] H1 breakout alert sent for pairs: {', '.join(breakout_pairs)}")
 
         # --- Group Breakout Alerts ---
-        # Only send alerts if min_pairs break out
-        last_group_alerts = run_group_breakout_alert(last_group_alerts, min_pairs=3)
+        # run_group_breakout_alert() should return a dict: {currency: list_of_pairs_that_triggered_alert}
+        group_alert_results = run_group_breakout_alert(last_group_alerts, min_pairs=3)
 
-        # Log only actual alerts that meet min_pairs
-        for currency, breakout_pairs in last_group_alerts.items():
-            if len(breakout_pairs) >= 3:
+        # Log only currencies that actually triggered alerts with enough pairs
+        for currency, breakout_pairs in group_alert_results.items():
+            if breakout_pairs and isinstance(breakout_pairs, list) and len(breakout_pairs) >= 3:
                 logging.warning(f"✅ Sent {currency} breakout alert: {', '.join(breakout_pairs)}")
+
+        # Update last_group_alerts tracker with only the actual alerts sent
+        last_group_alerts.update(group_alert_results)
 
         # --- Forex News Alerts ---
         events = fetch_forexfactory_events()
