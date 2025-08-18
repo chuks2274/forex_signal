@@ -4,14 +4,14 @@ import time
 
 from config import PAIRS, OANDA_API, HEADERS, ALERT_COOLDOWN, STRENGTH_ALERT_COOLDOWN
 from currency_strength import run_currency_strength_alert
-from breakout import run_group_breakout_alert  # persistent
+from breakout import run_group_breakout_alert, check_breakout_h1
 from forex_news_alert import fetch_forexfactory_events
 from utils import send_telegram, get_current_session
-from trade_signal import send_trade_signal, select_best_trade_pair, last_trade_alert_times
+from trade_signal import send_trade_signal, last_trade_alert_times
 
 # ================= SETUP LOGGING =================
 logger = logging.getLogger("forex_bot")
-logger.setLevel(logging.WARNING)  # Only warnings and errors
+logger.setLevel(logging.WARNING)
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s")
 
 # ================= LAST ALERT TRACKERS =================
@@ -30,6 +30,53 @@ def cleanup_old_session_alerts(current_session):
     keys_to_remove = [key for key in last_trade_alert_times if key[1] != current_session]
     for key in keys_to_remove:
         del last_trade_alert_times[key]
+
+def check_trade_signal(alerted_currencies, pair, session, now_ts):
+    """
+    Strict trade signal rules:
+    - BUY: base > 0, quote < 0
+    - SELL: base < 0, quote > 0
+    - Pair in PAIRS
+    - Must pass H1 breakout check
+    - Not already alerted this session (cooldown)
+    """
+    if "_" not in pair:
+        return False
+
+    base, quote = pair.split("_")
+    base_strength = alerted_currencies.get(base, 0)
+    quote_strength = alerted_currencies.get(quote, 0)
+
+    # Determine signal type
+    signal_type = None
+    if base_strength > 0 and quote_strength < 0:
+        signal_type = "BUY"
+    elif base_strength < 0 and quote_strength > 0:
+        signal_type = "SELL"
+    else:
+        return False  # Not a valid trade signal
+
+    # Must be in allowed pairs
+    if pair not in PAIRS:
+        return False
+
+    # Must pass H1 breakout
+    if not check_breakout_h1(pair):
+        return False
+
+    # Cooldown check
+    key = (pair, session)
+    if key in last_trade_alert_times and now_ts - last_trade_alert_times[key] < ALERT_COOLDOWN:
+        return False
+
+    # ✅ valid signal
+    last_trade_alert_times[key] = now_ts
+    send_trade_signal(pair, base_strength, quote_strength, session_name=session)
+    logger.warning(
+        f"[Trade Signal] Sent {signal_type} signal for {pair} "
+        f"(Base {base_strength}, Quote {quote_strength})"
+    )
+    return True
 
 # ================= MAIN LOOP =================
 while True:
@@ -71,25 +118,13 @@ while True:
                     formatted_list.append(p)
 
             if formatted_list and len(formatted_list) >= 3:
-                msg_text = (
-                    f"📢 {currency} Group Breakout Alert! ({len(formatted_list)} pairs)\n\n"
-                    + "\n".join(sorted(formatted_list))
-                )
-                send_telegram(msg_text)
-                logger.warning(f"✅ Sent {currency} breakout alert: {', '.join(sorted(formatted_list))}")
+                logger.warning(f"[Breakout] {currency} breakout detected: {', '.join(sorted(formatted_list))}")
 
-        # --- Trade Signal Alert ---
-        if alerted_currencies:
-            best_signal_result = select_best_trade_pair(alerted_currencies, valid_pairs=PAIRS)
-            if best_signal_result:
-                pair, action, base_strength, quote_strength, session = best_signal_result
-                cleanup_old_session_alerts(session)
-
-                key = (pair, session)
-                if key not in last_trade_alert_times or now_ts - last_trade_alert_times[key] >= ALERT_COOLDOWN:
-                    send_trade_signal(pair, base_strength, quote_strength, session_name=session)
-                    last_trade_alert_times[key] = now_ts
-                    logger.warning(f"[Trade Signal] Sent {action} signal for {pair} (Base {base_strength}, Quote {quote_strength})")
+        # --- Trade Signal Alerts (strict check, independent of strength alerts) ---
+        if alerted_currencies and current_session:
+            cleanup_old_session_alerts(current_session)
+            for pair in PAIRS:
+                check_trade_signal(alerted_currencies, pair, current_session, now_ts)
 
         # --- Forex News Alerts ---
         events = fetch_forexfactory_events()

@@ -2,7 +2,7 @@ import datetime
 import json
 import logging
 import os
-from config import PAIRS
+from config import PAIRS, ALERT_COOLDOWN
 from breakout import check_breakout_h1
 from utils import send_telegram, get_current_session
 
@@ -48,7 +48,14 @@ def clear_expired_session_alerts():
 
 # ================= TRADE SIGNAL SELECTION =================
 def select_best_trade_pair(alerted_currencies, valid_pairs=None, bypass_h1=False):
-    """Select the best trade pair based on currency strength and optional H1 breakout."""
+    """
+    Strict selection:
+    - BUY: base > 0, quote < 0
+    - SELL: base < 0, quote > 0
+    - Pair must exist in PAIRS
+    - Must pass H1 breakout (unless bypass_h1=True)
+    - Cooldown respected
+    """
     if valid_pairs is None:
         valid_pairs = PAIRS
 
@@ -62,14 +69,16 @@ def select_best_trade_pair(alerted_currencies, valid_pairs=None, bypass_h1=False
         logger.warning("[Trade Signal] No active session found")
         return None
 
-    sorted_currs = sorted(alerted_currencies.items(), key=lambda x: x[1], reverse=True)
+    # Sort currencies by absolute strength
+    sorted_currs = sorted(alerted_currencies.items(), key=lambda x: abs(x[1]), reverse=True)
 
-    for i, (base, base_strength) in enumerate(sorted_currs):
-        for j, (quote, quote_strength) in enumerate(sorted_currs[::-1]):
+    for base, base_strength in sorted_currs:
+        for quote, quote_strength in sorted_currs[::-1]:
             if base == quote:
                 continue
 
             # Determine action
+            action = None
             if base_strength > 0 and quote_strength < 0:
                 action = "BUY"
             elif base_strength < 0 and quote_strength > 0:
@@ -83,19 +92,19 @@ def select_best_trade_pair(alerted_currencies, valid_pairs=None, bypass_h1=False
                 if flipped in valid_pairs:
                     pair = flipped
                 else:
-                    continue  # silently skip invalid pair
+                    continue
 
-            if last_trade_alert_times.get((pair, session)):
-                continue  # silently skip already alerted
+            key = (pair, session)
+            if key in last_trade_alert_times and now_ts - last_trade_alert_times[key] < ALERT_COOLDOWN:
+                continue
 
             if not bypass_h1 and not check_breakout_h1(pair):
-                continue  # silently skip H1 failed
-            # else: bypass_h1 = True -> continue
+                continue
 
-            # Mark alert and persist
-            last_trade_alert_times[(pair, session)] = now_ts
+            last_trade_alert_times[key] = now_ts
             save_alerts()
-            logger.warning(f"[Trade Signal] Selected signal for {pair} ({action})")
+            logger.warning(f"[Trade Signal] Selected {action} signal for {pair} "
+                           f"(Base {base_strength}, Quote {quote_strength})")
             return (pair, action, base_strength, quote_strength, session)
 
     return None
