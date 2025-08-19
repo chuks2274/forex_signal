@@ -10,3 +10,4 @@ requests==2.32.4
 six==1.17.0
 tzdata==2025.2
 urllib3==2.5.0
+feedparser==6.0.11

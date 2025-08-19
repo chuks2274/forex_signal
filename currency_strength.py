@@ -1,19 +1,19 @@
-# currency_strength.py
 import logging
 import time
 from config import PAIRS, OANDA_API, HEADERS, STRENGTH_ALERT_COOLDOWN
 from utils import get_recent_candles, rsi, ema_slope, atr, send_telegram
+from forex_news_alert import send_news_alert_for_trade  # news alert function
 
-# Configure logging for module use
+# Configure logging
 logger = logging.getLogger("forex_bot")
 logging.basicConfig(level=logging.INFO)
 
-# All currencies to track (base/quote)
+# All currencies to track
 CURRENCIES = ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "NZD", "CAD"]
 
 # ===================== Core strength calculation =====================
 def calculate_strength(oanda_api, headers):
-    """Calculate currency strength scores and rank currencies."""
+    """Calculate currency strength scores and map to +7 … -7, skipping 0."""
     scores = {c: [] for c in CURRENCIES}
 
     for pair in PAIRS:
@@ -44,6 +44,7 @@ def calculate_strength(oanda_api, headers):
         scores[base].append(score_base)
         scores[quote].append(-score_base)
 
+    # Calculate average scores
     avg_scores = {}
     for cur, vals in scores.items():
         if vals:
@@ -52,18 +53,27 @@ def calculate_strength(oanda_api, headers):
             except Exception as e:
                 logger.error(f"Error calculating average for {cur}: {e}")
 
+    # Sort descending
     sorted_scores = sorted(avg_scores.items(), key=lambda x: x[1], reverse=True)
-    n = len(CURRENCIES)
+
+    # Map ranks linearly from +7 to -7, skipping 0
+    n = len(sorted_scores)
+    max_rank = 7
+    min_rank = -7
     rank_map = {}
     for idx, (cur, _) in enumerate(sorted_scores):
-        rank = 7 - (idx * 14) / (n - 1)
-        rank_map[cur] = int(round(rank))
+        # Linear mapping from max to min
+        rank = max_rank - (idx * (max_rank - min_rank) / (n - 1))
+        rank = int(round(rank))
+        # Skip 0
+        if rank == 0:
+            rank = 1 if idx < n / 2 else -1
+        rank_map[cur] = rank
 
     return rank_map
 
 # ===================== Format alert =====================
 def format_strength_alert(rank_map):
-    """Return a nicely formatted currency strength alert string."""
     msg = "📊 Currency Strength Alert 📊\n"
     msg += "Currency Strength Rankings (from +7 strongest to -7 weakest):\n"
     for cur, rank in sorted(rank_map.items(), key=lambda x: x[1], reverse=True):
@@ -71,13 +81,9 @@ def format_strength_alert(rank_map):
         msg += f"{cur}: {sign}{rank}\n"
     return msg
 
-# ===================== Alert function (timestamp-based) =====================
-def run_currency_strength_alert(oanda_api, headers, last_alert_time=None, cooldown=STRENGTH_ALERT_COOLDOWN, threshold=5):
-    """
-    Runs the currency strength alert if cooldown has passed.
-    Uses timestamps for cooldown tracking (full uniformity with breakout alerts).
-    Returns a dictionary of alerted currencies and the updated last_alert_time.
-    """
+# ===================== Alert function with +5/+6/+7 / -5/-6/-7 filter =====================
+def run_currency_strength_alert(oanda_api, headers, last_alert_time=None,
+                                cooldown=STRENGTH_ALERT_COOLDOWN):
     now_ts = time.time()
     last_ts = last_alert_time or 0
 
@@ -92,19 +98,23 @@ def run_currency_strength_alert(oanda_api, headers, last_alert_time=None, cooldo
             logger.warning("No rank map calculated for currency strength alert")
             return {}, last_ts
 
-        alerted_currencies = {cur: val for cur, val in rank_map.items() if abs(val) >= threshold}
+        # Full alert message includes all currencies
+        alert_msg = format_strength_alert(rank_map)
+        if send_telegram(alert_msg):
+            logger.info("✅ Sent full currency strength alert")
 
-        if alerted_currencies:
-            alert_msg = format_strength_alert(rank_map)
-            if send_telegram(alert_msg):
-                logger.info(f"✅ Sent currency strength alert: {alerted_currencies}")
-                return alerted_currencies, now_ts
-            else:
-                logger.warning("Failed to send currency strength alert")
-                return alerted_currencies, last_ts
-        else:
-            logger.info("No currencies exceeded the threshold for alert")
-            return {}, last_ts
+        # --- Filter only +5/+6/+7 and -5/-6/-7 ---
+        filtered_currencies = {cur: val for cur, val in rank_map.items() if abs(val) >= 5}
+
+        if filtered_currencies:
+            pairs_to_check = [pair for pair in PAIRS
+                              if pair[:3] in filtered_currencies or pair[4:] in filtered_currencies]
+            for pair in pairs_to_check:
+                send_news_alert_for_trade(pair)
+
+            logger.info(f"✅ Sent trade/news alerts for pairs: {pairs_to_check}")
+
+        return filtered_currencies, now_ts
 
     except Exception as e:
         logger.error(f"Error in run_currency_strength_alert: {e}", exc_info=True)
@@ -131,10 +141,6 @@ if __name__ == "__main__":
 
 # ===================== Helper to get latest strengths =====================
 def get_currency_strength():
-    """
-    Returns the latest currency strength as a dict, for Trade Signal integration.
-    Example: {"EUR": 5, "USD": 2, "GBP": 4, ...}
-    """
     try:
         return calculate_strength(OANDA_API, HEADERS)
     except Exception as e:

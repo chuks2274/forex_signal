@@ -1,9 +1,8 @@
 import logging
 import datetime
 import time
-import requests
 from utils import get_recent_candles, send_telegram
-from config import PAIRS, ALERT_COOLDOWN, OANDA_API, OANDA_TOKEN, OANDA_ACCOUNT
+from config import PAIRS, ALERT_COOLDOWN
 
 # --- Configure logging ---
 logger = logging.getLogger("breakout")
@@ -70,7 +69,7 @@ def run_group_breakout_alert(min_pairs=3):
     """
     Checks all currencies for group breakouts with ALERT_COOLDOWN.
     Returns a dict of {currency: [pairs_that_triggered_alert]}.
-    Uses persistent last_group_alerts so restarts won't spam alerts.
+    No news alerts are triggered here; news is only sent via trade signals.
     """
     global last_group_alerts  # always refer to module-level persistent dict
 
@@ -95,24 +94,6 @@ def run_group_breakout_alert(min_pairs=3):
                     last_group_alerts[group] = now_ts  # persist timestamp
 
     return group_alerts
-
-# --- OANDA market check ---
-def is_market_open_oanda(instrument="EUR_USD"):
-    """Check if OANDA market is open for a given instrument."""
-    url = f"{OANDA_API}/accounts/{OANDA_ACCOUNT}/instruments/{instrument}/candles"
-    headers = {"Authorization": f"Bearer {OANDA_TOKEN}"}
-    params = {"count": 1, "granularity": "H1"}
-
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        if response.status_code != 200:
-            logger.warning(f"OANDA API response {response.status_code} for {instrument}")
-            return False
-        data = response.json()
-        return bool(data.get("candles", []))
-    except Exception as e:
-        logger.error(f"Error checking OANDA market: {e}")
-        return False
 
 # --- Standalone test ---
 if __name__ == "__main__":
