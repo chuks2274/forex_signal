@@ -5,10 +5,11 @@ import os
 from config import PAIRS, ALERT_COOLDOWN
 from breakout import check_breakout_h1
 from utils import send_telegram, get_current_session
+from forex_news_alert import add_trade_signal  # 🔗 connect to news alerts
 
 # --- Logging ---
 logger = logging.getLogger("trade_signal")
-logger.setLevel(logging.WARNING)  # Only warnings and errors appear in Render logs
+logger.setLevel(logging.WARNING)  # Only warnings and errors appear in logs
 
 # --- Persistent storage file ---
 ALERTS_FILE = "trade_alerts.json"
@@ -104,27 +105,34 @@ def select_best_trade_pair(alerted_currencies, valid_pairs=None, bypass_h1=False
             last_trade_alert_times[key] = now_ts
             save_alerts()
             logger.warning(f"[Trade Signal] Selected {action} signal for {pair} "
-                           f"(Base {base_strength}, Quote {quote_strength})")
+                            f"(Base {base_strength}, Quote {quote_strength})")
             return (pair, action, base_strength, quote_strength, session)
 
     return None
 
 # ================= TRADE SIGNAL SENDING =================
 def send_trade_signal(pair, base_strength, quote_strength, session_name="Unknown"):
-    """Send trade signal via Telegram and log result."""
+    """Send trade signal via Telegram and log result + update news alerts."""
     try:
         signal_type = None
+        emoji = ""
         if base_strength > 0 and quote_strength < 0:
             signal_type = "BUY"
+            emoji = "📈"
         elif base_strength < 0 and quote_strength > 0:
             signal_type = "SELL"
+            emoji = "📉"
 
         if signal_type:
-            msg = f"[Trade Signal] {signal_type} {pair} [{session_name} Session] (Base {base_strength:+}, Quote {quote_strength:+})"
+            msg = f"{emoji} {signal_type} {pair} [{session_name} Session] (Base {base_strength:+}, Quote {quote_strength:+})"
             logger.warning(msg)
             success = send_telegram(msg)
             if not success:
                 logger.error(f"[Trade Signal] Telegram send FAILED for {pair}")
+
+            # 🔗 Automatically add this trade to ACTIVE_TRADES for news alerts
+            add_trade_signal(pair.replace("_", ""), signal_type)
+
         else:
             logger.warning(f"[Trade Signal] No clear signal for {pair} (Base {base_strength:+}, Quote {quote_strength:+})")
 

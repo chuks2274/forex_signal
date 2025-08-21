@@ -16,7 +16,6 @@ logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s")
 
 # ================= LAST ALERT TRACKERS =================
 last_strength_alert_time = 0
-last_news_alert_times = {}  # {pair_event: timestamp}
 last_heartbeat = 0
 HEARTBEAT_INTERVAL = 24 * 3600  # seconds
 
@@ -31,11 +30,7 @@ def cleanup_old_session_alerts(current_session):
         del last_trade_alert_times[key]
 
 def check_trade_signal(alerted_currencies, pair, session, now_ts):
-    """
-    Checks trade signal, validates H1 breakout, cooldown, and triggers:
-    - Trade alert Telegram
-    - News alert via send_news_alert_for_trade()
-    """
+    """Validate trade signal, H1 breakout, cooldown, and send alerts."""
     if "_" not in pair:
         return False
 
@@ -46,7 +41,6 @@ def check_trade_signal(alerted_currencies, pair, session, now_ts):
     if abs(base_strength) < 5 or abs(quote_strength) < 5:
         return False
 
-    # Determine BUY/SELL
     signal_type = None
     if base_strength > 0 and quote_strength < 0:
         signal_type = "BUY"
@@ -62,12 +56,12 @@ def check_trade_signal(alerted_currencies, pair, session, now_ts):
     if key in last_trade_alert_times and now_ts - last_trade_alert_times[key] < ALERT_COOLDOWN:
         return False
 
-    # ✅ Valid signal: send trade alert
+    # ✅ Send trade alert
     last_trade_alert_times[key] = now_ts
     send_trade_signal(pair, base_strength, quote_strength, session_name=session)
 
-    # --- Trigger news alert if applicable ---
-    send_news_alert_for_trade(pair)
+    # ✅ Send news alert only for valid trade signal
+    send_news_alert_for_trade({"pair": pair.replace("_", ""), "type": signal_type})
     return True
 
 # ================= MAIN LOOP =================
@@ -88,13 +82,14 @@ while True:
             oanda_api=OANDA_API,
             headers=HEADERS,
             last_alert_time=last_strength_alert_time,
-            cooldown=STRENGTH_ALERT_COOLDOWN
+            cooldown=STRENGTH_ALERT_COOLDOWN,
+            last_trade_alert_times=last_trade_alert_times  # ✅ pass cooldown tracker
         )
 
         # --- Group Breakout Alerts ---
         run_group_breakout_alert(3)  # no terminal logging
 
-        # --- Trade Signal Alerts ---
+        # --- Trade Signal Alerts (extra coverage for standalone pairs) ---
         if alerted_currencies and current_session:
             cleanup_old_session_alerts(current_session)
             for pair in PAIRS:
