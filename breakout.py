@@ -65,7 +65,7 @@ def check_breakout_h1(pair):
         logger.error(f"[H1] {pair} - Error: {e}")
         return False
 
-def run_group_breakout_alert(min_pairs=3):
+def run_group_breakout_alert(min_pairs=4):
     """
     Checks all currencies for group breakouts with ALERT_COOLDOWN.
     Returns a dict of {currency: [pairs_that_triggered_alert]}.
