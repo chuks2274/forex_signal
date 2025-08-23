@@ -1,200 +1,152 @@
-import os
 import time
-import json
 import logging
-from typing import Dict, List, Optional, Tuple
-import numpy as np
-
+from typing import Dict, List, Optional
 from config import PAIRS, ALERT_COOLDOWN
-from utils import send_telegram, get_recent_candles
+from utils import get_recent_candles, save_active_trades, load_active_trades, send_telegram, atr, rsi
 from breakout import check_breakout_h1, check_breakout_yesterday
-from currency_strength import run_currency_strength_alert
 
-# ---------------- Logging ----------------
 logger = logging.getLogger("trade_signal")
 logger.setLevel(logging.INFO)
 
-# ---------------- Persistent storage ----------------
-ALERTS_FILE = "trade_alerts.json"
-ACTIVE_TRADES_FILE = "active_trades.json"
-last_trade_alert_times: Dict[Tuple[str, str], float] = {}
-ACTIVE_TRADES: List[Dict[str, str]] = []
+_ACTIVE_TRADES: List[Dict] = load_active_trades()
+_LAST_ALERT_TIME: Dict[str, float] = {}
 
-# ================= Persistence ======================
-def load_alerts():
-    global last_trade_alert_times
-    if os.path.exists(ALERTS_FILE):
-        try:
-            with open(ALERTS_FILE, "r") as f:
-                data = json.load(f)
-            last_trade_alert_times = {tuple(k.split("|")): float(v) for k, v in data.items()}
-            logger.info("[Trade Signal] Loaded previous alerts")
-        except Exception as e:
-            logger.error(f"[Trade Signal] Failed to load alerts: {e}")
+MIN_RRR = 2.0  # Minimum 1:2 risk-to-reward
 
-def save_alerts():
-    try:
-        data = {"|".join(k): v for k, v in last_trade_alert_times.items()}
-        with open(ALERTS_FILE, "w") as f:
-            json.dump(data, f)
-        logger.info("[Trade Signal] Alerts saved")
-    except Exception as e:
-        logger.error(f"[Trade Signal] Failed to save alerts: {e}")
+# ---------------- Retest Check ----------------
+def check_retest_confirmation(pair: str, breakout_level: float, direction: str) -> bool:
+    m15 = get_recent_candles(pair, "M15", 50)
+    if not m15:
+        return False
+    closes = [c["close"] for c in m15]
+    atr_val = atr(m15)
+    tolerance = atr_val * 0.5
+    rsi_series = rsi(closes)
+    for i in range(-5, 0):
+        candle = m15[i]
+        close = candle["close"]
+        low = candle["low"]
+        high = candle["high"]
+        rsi_val = rsi_series[i]
+        if direction == "buy" and abs(low - breakout_level) <= tolerance and close > candle["open"] and rsi_val < 70:
+            return True
+        elif direction == "sell" and abs(high - breakout_level) <= tolerance and close < candle["open"] and rsi_val > 30:
+            return True
+    return False
 
-def save_active_trades():
-    """Save active trades to JSON file for news_alert.py."""
-    try:
-        with open(ACTIVE_TRADES_FILE, "w") as f:
-            json.dump(ACTIVE_TRADES, f)
-        logger.info("[Trade Signal] Active trades saved")
-    except Exception as e:
-        logger.error(f"[Trade Signal] Failed to save active trades: {e}")
+# ---------------- Risk-to-Reward ----------------
+def calculate_rrr(entry, sl, tp):
+    risk = abs(entry - sl)
+    reward = abs(tp - entry)
+    return reward / risk if risk != 0 else 0
 
-# ================= Helpers =========================
-def _parse_pair(pair: str) -> Tuple[str, str, str]:
-    """Normalize pair names like EURUSD → EUR_USD"""
-    p = pair.replace("-", "").replace("/", "").upper()
-    if "_" in p:
-        base, quote = p.split("_")[:2]
-    else:
-        base, quote = p[:3], p[3:6]
-    return f"{base}_{quote}", base, quote
+# ---------------- Build Trade Signal ----------------
+def build_trade_signal(pair: str, candles_1h: List[Dict], strength_data: Dict[str, int]) -> Optional[Dict]:
+    # H1 breakout today or yesterday + retest
+    h1_breakout = check_breakout_h1(pair, candles_1h, strength_data)
+    yest_breakout = check_breakout_yesterday(pair, candles_1h, strength_data)
+    breakout_info = h1_breakout or yest_breakout
+    scenario = "Breakout Today" if h1_breakout else "Breakout Yesterday + Retest"
+    if not breakout_info:
+        return None
+    breakout_level, _original_direction, _ = breakout_info
 
-def add_active_trade(pair: str, action: str):
-    """Add trade to active list and save to file."""
-    global ACTIVE_TRADES
-    ACTIVE_TRADES.append({"pair": pair, "type": action})
-    save_active_trades()  # Save immediately
-    msg = f"🚨 Active trade added: {pair} ({action})"
-    logger.info(f"[Trade] {msg}")
-    send_telegram(msg)
-
-def remove_active_trade(pair: str, action: str):
-    """Remove trade from active list and save to file."""
-    global ACTIVE_TRADES
-    ACTIVE_TRADES[:] = [t for t in ACTIVE_TRADES if not (t['pair'] == pair and t['type'] == action)]
-    save_active_trades()  # Save immediately
-    msg = f"🗑️ Active trade removed: {pair} ({action})"
-    logger.info(f"[Trade] {msg}")
-    send_telegram(msg)
-
-# ================= Build Trade Signal =================
-def build_trade_signal(pair: str, candles_1h: List[dict], candles_15m: List[dict],
-                       strength_data: Dict[str,float], min_rrr: int = 2) -> Optional[dict]:
-    norm_pair, base, quote = _parse_pair(pair)
+    # Strength diff
+    base, quote = pair.split("_")
     base_strength = strength_data.get(base, 0)
     quote_strength = strength_data.get(quote, 0)
-    diff = abs(base_strength - quote_strength)
+    strength_diff = abs(base_strength - quote_strength)
 
-    # Threshold logic
-    if (
-        (base_strength >= 7 and quote_strength <= -7) or
-        (base_strength >= 5 and quote_strength <= -7) or
-        (base_strength >= 5 and quote_strength <= -5)
-    ):
-        direction = "BUY"
-    elif (
-        (base_strength <= -7 and quote_strength >= 7) or
-        (base_strength <= -5 and quote_strength >= 7) or
-        (base_strength <= -5 and quote_strength >= 5)
-    ):
-        direction = "SELL"
-    else:
+    # Only trigger exact points [10,12,14]
+    if strength_diff not in [10, 12, 14]:
         return None
 
-    # Breakout scenario
-    h1_breakout = check_breakout_h1(norm_pair)
-    yesterday_breakout = check_breakout_yesterday(norm_pair)
-    scenario = None
-    if h1_breakout:
-        scenario = "Breakout Today"
-    elif yesterday_breakout:
-        scenario = "Yesterday Breakout + Retest"
+    # Align strong → weak
+    if base_strength >= quote_strength:
+        strong_curr, strong_val = base, base_strength
+        weak_curr, weak_val = quote, quote_strength
+        alert_direction = "buy"
     else:
+        strong_curr, strong_val = quote, quote_strength
+        weak_curr, weak_val = base, base_strength
+        alert_direction = "sell"
+
+    # Entry, SL, TP
+    atr_val = atr(candles_1h)
+    entry = get_recent_candles(pair, "M15", 1)[-1]["close"]
+    if alert_direction == "buy":
+        stop_loss = entry - atr_val
+        tp1 = entry + atr_val * 2
+        tp2 = entry + atr_val * 4
+        tp3 = entry + atr_val * 6
+    else:
+        stop_loss = entry + atr_val
+        tp1 = entry - atr_val * 2
+        tp2 = entry - atr_val * 4
+        tp3 = entry - atr_val * 6
+
+    # ✅ Verify M15 retest at actual breakout level
+    if not check_retest_confirmation(pair, breakout_level, alert_direction):
+        logger.info(f"Skipping {pair}: M15 retest not confirmed")
         return None
 
-    last_candle_15m = candles_15m[-1]
-    entry = float(last_candle_15m["mid"]["c"])
-    recent_candles = candles_15m[-14:]
-    atr_val = np.mean([float(c["mid"]["h"]) - float(c["mid"]["l"]) for c in recent_candles])
-    stop_loss = entry - atr_val if direction == "BUY" else entry + atr_val
+    # Minimum RRR filter
+    rrr = calculate_rrr(entry, stop_loss, tp1)
+    if rrr < MIN_RRR:
+        return None
 
-    tps = {}
-    for i in range(3):
-        if direction == "BUY":
-            tps[f"TP{i+1}"] = float(round(entry + atr_val * (i + 2), 5))
-        else:
-            tps[f"TP{i+1}"] = float(round(entry - atr_val * (i + 2), 5))
+    # Format strengths with + / - signs
+    strong_str = f"{strong_curr}:{'+' if strong_val > 0 else ''}{strong_val}"
+    weak_str = f"{weak_curr}:{'+' if weak_val > 0 else ''}{weak_val}"
 
-    return {
-        "pair": norm_pair,
-        "pair_compact": norm_pair.replace("_",""),
-        "action": direction,
-        "entry": round(entry,5),
-        "stop_loss": round(stop_loss,5),
-        "take_profit_levels": tps,
-        "ATR": round(atr_val,5),
-        "scenario": scenario,
-        "timeframes": {"breakout":"1H","retest":"15M"},
-        "strength_snapshot": {base: base_strength, quote: quote_strength},
-        "strength_diff": diff,
-        "min_RRR": min_rrr,
-    }
+    # Send alert
+    symbol = "🟢 BUY" if alert_direction == "buy" else "🔴 SELL"
+    alert_msg = f"""{symbol} {pair} [strength_alert]
+Scenario: {scenario}
+Strength Diff: {strength_diff}
+Strengths: {strong_str}, {weak_str}
+Entry: {entry:.5f} | SL: {stop_loss:.5f} | ATR: {atr_val:.5f}
+TPs: TP1:{tp1:.5f}, TP2:{tp2:.5f}, TP3:{tp3:.5f} | Min RRR:1:{MIN_RRR}
+Timeframes: {{'breakout':'H1','retest':'M15'}}"""
+    send_telegram(alert_msg)
 
-# ================= Send Alerts ======================
-def find_and_send_best_signal(signal: dict, session_name: str) -> bool:
-    if not signal:
-        return False
+    # Save triggered trade
+    _ACTIVE_TRADES.append({
+        "pair": pair,
+        "direction": alert_direction,
+        "entry": entry,
+        "stop_loss": stop_loss,
+        "take_profit_levels": [tp1, tp2, tp3],
+        "strength_diff": strength_diff,
+        "time": time.time()
+    })
 
-    action_upper = signal["action"].upper()
-    emoji = "🟢" if action_upper == "BUY" else "🔴"
-    strength_text = ", ".join([f"{k}:{v}" for k,v in signal["strength_snapshot"].items()])
-    tp_text = ", ".join([f"{k}:{v}" for k,v in signal["take_profit_levels"].items()])
+    logger.info(f"Trade triggered: {pair} | Direction: {alert_direction} | Strength Diff: {strength_diff}")
+    return _ACTIVE_TRADES[-1]
 
-    msg = (
-        f"{emoji} {action_upper} {signal['pair']} [{session_name}]\n"
-        f"Scenario: {signal.get('scenario','N/A')}\n"
-        f"Strength Diff: {signal.get('strength_diff','N/A')}\n"
-        f"Strengths: {strength_text}\n"
-        f"Entry: {signal['entry']} | SL: {signal['stop_loss']} | ATR: {signal['ATR']}\n"
-        f"TPs: {tp_text} | Min RRR: 1:{signal.get('min_RRR','N/A')}\n"
-        f"Timeframes: {signal.get('timeframes','N/A')}"
-    )
+# ---------------- Main Loop ----------------
+def run_trade_signal_loop(strength_data: Dict[str, int]):
+    global _ACTIVE_TRADES, _LAST_ALERT_TIME
+    now = time.time()
+    triggered_pair = None
 
-    logger.info(f"[Trade Signal] {msg.replace(os.linesep,' | ')}")
-    send_telegram(msg)
-
-    add_active_trade(signal["pair"], action_upper)
-
-    return True
-
-# ================= Main Trade Loop =========================
-def run_trade_signal_loop(alerted_currencies=None):
-    now_ts = time.time()
-    if not alerted_currencies:
-        return
-
-    session = "strength_alert"
     for pair in PAIRS:
-        if "_" not in pair:
+        if triggered_pair:
+            break
+        last_ts = _LAST_ALERT_TIME.get(pair, 0)
+        if now - last_ts < ALERT_COOLDOWN:
             continue
-
-        key = (pair, session)
-        if key in last_trade_alert_times and now_ts - last_trade_alert_times[key] < ALERT_COOLDOWN:
+        candles_1h = get_recent_candles(pair, "H1", 50)
+        if not candles_1h:
             continue
+        try:
+            result = build_trade_signal(pair, candles_1h, strength_data)
+            if result:
+                _LAST_ALERT_TIME[pair] = now
+                triggered_pair = pair
+        except Exception as e:
+            logger.error(f"Error building trade signal for {pair}: {e}")
 
-        candles_1h = get_recent_candles(pair, granularity="H1", count=30)
-        candles_15m = get_recent_candles(pair, granularity="M15", count=30)
-        if not candles_1h or not candles_15m:
-            continue
-
-        signal = build_trade_signal(pair, candles_1h, candles_15m, alerted_currencies)
-        if not signal:
-            continue
-
-        sent = find_and_send_best_signal(signal, session)
-        if sent:
-            last_trade_alert_times[key] = now_ts
-            logger.info(f"✅ Sent trade alert for {pair}: {signal['action']}")
-
-    save_alerts()
+    if triggered_pair:
+        save_active_trades(_ACTIVE_TRADES)
+        logger.info("Trade alerts saved")

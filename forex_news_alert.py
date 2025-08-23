@@ -4,27 +4,44 @@ import requests
 import time
 import json
 from threading import Lock
-from utils import send_telegram, load_active_trades
+from utils import send_telegram, load_active_trades, save_active_trades
 
 # --- Setup logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-logger = logging.getLogger("news_alert")
+logger = logging.getLogger("forex_news_alert")
 
 # --- Config ---
 WATCHED_CURRENCIES = ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "NZD", "CAD"]
 WATCHED_IMPACTS = ["High", "Medium"]
 NEWS_URL = "https://api.tradingeconomics.com/calendar?c=guest:guest"
 PRE_ALERT_MINUTES = 60  # Pre-news alert 1 hour before event
-
 IMPACT_EMOJI = {"High": "🔥", "Medium": "⚡"}
 
 # --- Alert tracking ---
 alerted_events = set()
 alert_lock = Lock()
+ACTIVE_TRADES: list[dict] = []
+
+NEWS_ALERT_COOLDOWN = 300  # 5 min per news check
+
+# ====================== Trade Signal Integration ======================
+def add_trade_signal(signal: dict):
+    """Add a trade signal, save to active trades, and send Telegram alert."""
+    global ACTIVE_TRADES
+    exists = any(t.get('pair') == signal.get('pair') and t.get('type') == signal.get('direction') for t in ACTIVE_TRADES)
+    if not exists:
+        ACTIVE_TRADES.append({"pair": signal.get('pair'), "type": signal.get('direction')})
+        save_active_trades(ACTIVE_TRADES)
+        logger.info(f"[Trade Signal Added] {signal}")
+        send_telegram(
+            f"🚨 Trade Signal: {signal['direction'].upper()} {signal['pair']} | "
+            f"Entry: {signal['entry']} | SL: {signal['stop_loss']} | TP1/2/3: {signal['take_profit_levels']}"
+        )
+    else:
+        logger.info(f"[Trade Signal Skipped] Already active: {signal.get('pair')} {signal.get('direction')}")
 
 # ====================== News Fetching ======================
 def fetch_tradingeconomics_events():
-    """Fetch upcoming economic news events."""
     try:
         response = requests.get(NEWS_URL)
         response.raise_for_status()
@@ -36,10 +53,12 @@ def fetch_tradingeconomics_events():
         return []
 
 def filter_relevant_events(events, currencies, watched_impacts):
-    """Filter events for tracked currencies and high/medium impact."""
     filtered = []
     for event in events:
-        impact = event.get("impact", "").capitalize()
+        impact = event.get("impact", "")
+        if not impact:
+            continue
+        impact = impact.capitalize()
         country = event.get("country", "")
         title = event.get("event", "")
         timestamp = event.get("date", 0)
@@ -49,8 +68,13 @@ def filter_relevant_events(events, currencies, watched_impacts):
         if country not in currencies and not any(cur in title for cur in currencies):
             continue
 
+        try:
+            event_time = datetime.datetime.fromtimestamp(int(timestamp)/1000, tz=datetime.timezone.utc)
+        except Exception:
+            continue
+
         filtered.append({
-            "time": datetime.datetime.fromtimestamp(timestamp / 1000, tz=datetime.timezone.utc),
+            "time": event_time,
             "currency": country,
             "impact": impact,
             "event": title,
@@ -60,7 +84,7 @@ def filter_relevant_events(events, currencies, watched_impacts):
         })
     return filtered
 
-# ====================== Alerts ======================
+# ====================== Pre/Post News Alerts ======================
 def trigger_pre_news_alert(event, pair, signal_type):
     now = datetime.datetime.now(datetime.timezone.utc)
     delta = event['time'] - now
@@ -84,7 +108,7 @@ def trigger_pre_news_alert(event, pair, signal_type):
         logger.info(f"[News] Pre-news alert sent for {event['currency']} - {event['event']}")
 
 def trigger_post_news_alert(event):
-    if event.get("actual") is None:
+    if not event.get("actual"):
         return
 
     event_id = f"{event['time']}_{event['currency']}_{event['event']}_post"
@@ -95,14 +119,18 @@ def trigger_post_news_alert(event):
 
     msg = (
         f"{event['currency']} {event['event']}: "
-        f"Actual {event['actual']}, Forecast {event['forecast']}, Previous {event['previous']}"
+        f"Actual {event.get('actual')}, Forecast {event.get('forecast')}, Previous {event.get('previous')}"
     )
     send_telegram(msg)
     logger.info(f"[News] Post-news alert sent for {event['currency']} - {event['event']}")
 
+# ====================== Send Alerts for Active Trades ======================
 def send_news_alert_for_trade(trade):
-    pair = trade["pair"]
-    signal_type = trade["type"]
+    pair = trade.get("pair")
+    signal_type = trade.get("type")
+    if not pair or not signal_type:
+        return
+
     base, quote = pair[:3], pair[3:]
     relevant_currencies = [base, quote]
 
@@ -125,16 +153,17 @@ def send_news_alert_for_trade(trade):
 
 # ====================== Continuous Loop ======================
 def run_news_alert_loop():
+    global ACTIVE_TRADES
     logger.info("📡 Forex News Alert Loop Started!")
     while True:
         try:
-            active_trades = load_active_trades()  # load trades from active_trades.json
-            for trade in active_trades:
+            ACTIVE_TRADES = load_active_trades()
+            for trade in ACTIVE_TRADES:
                 send_news_alert_for_trade(trade)
         except Exception as e:
-            logger.error(f"[News] Error in news loop: {e}")
-        time.sleep(300)  # every 5 minutes
+            logger.error(f"[News] Error in news loop: {e}", exc_info=True)
+        time.sleep(NEWS_ALERT_COOLDOWN)
 
-# ---------------- Entry Point ----------------
+# ---------------- Entry Point -----------------
 if __name__ == "__main__":
     run_news_alert_loop()

@@ -23,9 +23,9 @@ def send_telegram(message: str) -> bool:
         logger.error(f"Failed to send telegram message: {e}")
         return False
 
-# ================= CANDLES =================
-def get_recent_candles(pair: str, granularity: str = "H1", count: int = 30) -> list:
-    """Fetch recent candles from OANDA using internal config."""
+# ================= OANDA CANDLES =================
+def fetch_oanda_candles(pair: str, granularity: str = "H1", count: int = 30) -> list:
+    """Fetch raw candles from OANDA API (unprocessed)."""
     try:
         url = f"{OANDA_API}/instruments/{pair}/candles"
         params = {"granularity": granularity, "count": count, "price": "M"}
@@ -33,8 +33,37 @@ def get_recent_candles(pair: str, granularity: str = "H1", count: int = 30) -> l
         r.raise_for_status()
         return r.json().get("candles", [])
     except Exception as e:
-        logger.error(f"Failed to get recent candles for {pair} at {granularity}: {e}")
+        logger.error(f"Failed to fetch OANDA candles for {pair} at {granularity}: {e}")
         return []
+
+def get_recent_candles(pair: str, timeframe: str = "H1", count: int = 30) -> list[dict]:
+    """
+    Fetch candles and normalize to dicts:
+    {"time", "open", "high", "low", "close"}
+    Works with OANDA JSON or tuple/list candle formats.
+    """
+    raw_candles = fetch_oanda_candles(pair, timeframe, count)
+    normalized = []
+    for c in raw_candles:
+        if isinstance(c, dict):
+            mid = c.get("mid", c)
+            normalized.append({
+                "time": c.get("time"),
+                "open": float(mid.get("o", mid.get("open", 0))),
+                "high": float(mid.get("h", mid.get("high", 0))),
+                "low": float(mid.get("l", mid.get("low", 0))),
+                "close": float(mid.get("c", mid.get("close", 0)))
+            })
+        elif isinstance(c, (tuple, list)) and len(c) >= 4:
+            normalized.append({
+                "open": float(c[0]),
+                "high": float(c[1]),
+                "low": float(c[2]),
+                "close": float(c[3])
+            })
+        else:
+            logger.warning(f"Skipped malformed candle for {pair}: {c}")
+    return normalized
 
 # Alias for backward compatibility
 get_candles = get_recent_candles
@@ -57,9 +86,9 @@ def atr(candles: list, period: int = 14) -> float:
         return 0.0
     trs = []
     for i in range(1, len(candles)):
-        high = float(candles[i]["mid"]["h"])
-        low = float(candles[i]["mid"]["l"])
-        prev_close = float(candles[i - 1]["mid"]["c"])
+        high = candles[i]["high"]
+        low = candles[i]["low"]
+        prev_close = candles[i - 1]["close"]
         tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
         trs.append(tr)
     return float(sum(trs[-period:]) / period)
@@ -67,24 +96,57 @@ def atr(candles: list, period: int = 14) -> float:
 def rsi(closes: list, period: int = 14) -> list:
     if len(closes) < period + 1:
         return []
-    deltas = [closes[i+1] - closes[i] for i in range(len(closes)-1)]
+    deltas = [closes[i + 1] - closes[i] for i in range(len(closes) - 1)]
     gains = [max(delta, 0) for delta in deltas]
     losses = [abs(min(delta, 0)) for delta in deltas]
 
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
 
-    rsis = []
-    rsis.append(100 if avg_loss == 0 else 100 - (100 / (1 + (avg_gain / avg_loss))))
+    rsis = [100 if avg_loss == 0 else 100 - (100 / (1 + (avg_gain / avg_loss)))]
 
     for i in range(period, len(gains)):
         gain = gains[i]
         loss = losses[i]
-
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
+        rs = avg_gain / avg_loss if avg_loss != 0 else float('inf')
+        rsis.append(100 - (100 / (1 + rs)))
 
-        rsis.append(100 if avg_loss == 0 else 100 - (100 / (1 + (avg_gain / avg_loss))))
+    return rsis
+
+def calculate_atr(candles: list, period: int = 14) -> float:
+    """Calculate Average True Range (ATR) for trade_signal.py."""
+    if len(candles) < period + 1:
+        return 0.001
+    trs = [
+        max(candles[i]["high"] - candles[i]["low"],
+            abs(candles[i]["high"] - candles[i - 1]["close"]),
+            abs(candles[i]["low"] - candles[i - 1]["close"]))
+        for i in range(1, len(candles))
+    ]
+    return float(sum(trs[-period:]) / period)
+
+def calculate_rsi(closes: list, period: int = 14) -> list:
+    """Calculate RSI for trade_signal.py."""
+    if len(closes) < period + 1:
+        return [50] * len(closes)
+    deltas = [closes[i + 1] - closes[i] for i in range(len(closes) - 1)]
+    gains = [max(delta, 0) for delta in deltas]
+    losses = [abs(min(delta, 0)) for delta in deltas]
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    rsis = [100 if avg_loss == 0 else 100 - (100 / (1 + (avg_gain / avg_loss)))]
+
+    for i in range(period, len(gains)):
+        gain = gains[i]
+        loss = losses[i]
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+        rs = avg_gain / avg_loss if avg_loss != 0 else float('inf')
+        rsis.append(100 - (100 / (1 + rs)))
 
     return rsis
 
@@ -98,8 +160,8 @@ def ema_slope(closes: list, period: int = 10) -> float:
 
 # ================= SWING POINTS =================
 def find_swing_points(candles: list) -> tuple:
-    highs = [float(c["mid"]["h"]) for c in candles]
-    lows = [float(c["mid"]["l"]) for c in candles]
+    highs = [c["high"] for c in candles]
+    lows = [c["low"] for c in candles]
 
     swing_highs = []
     swing_lows = []
@@ -132,7 +194,6 @@ def get_current_session(now_utc=None) -> str:
 ACTIVE_TRADES_FILE = "active_trades.json"
 
 def load_active_trades():
-    """Load active trades from JSON file."""
     if not os.path.exists(ACTIVE_TRADES_FILE):
         return []
     try:
@@ -142,10 +203,9 @@ def load_active_trades():
         logger.error(f"[Utils] Failed to load active trades: {e}")
         return []
 
-def save_active_trades(active_trades):
-    """Save active trades to JSON file."""
+def save_active_trades(trades):
     try:
         with open(ACTIVE_TRADES_FILE, "w") as f:
-            json.dump(active_trades, f)
+            json.dump(trades, f)
     except Exception as e:
         logger.error(f"[Utils] Failed to save active trades: {e}")
