@@ -19,9 +19,13 @@ def check_retest_confirmation(pair: str, breakout_level: float, direction: str) 
     if not m15:
         return False
     closes = [c["close"] for c in m15]
+    if len(closes) < 5:
+        return False
     atr_val = atr(m15)
     tolerance = atr_val * 0.5
     rsi_series = rsi(closes)
+    if len(rsi_series) < 5:
+        return False
     for i in range(-5, 0):
         candle = m15[i]
         close = candle["close"]
@@ -41,8 +45,7 @@ def calculate_rrr(entry, sl, tp):
     return reward / risk if risk != 0 else 0
 
 # ---------------- Build Trade Signal ----------------
-def build_trade_signal(pair: str, candles_1h: List[Dict], strength_data: Dict[str, int]) -> Optional[Dict]:
-    # H1 breakout today or yesterday + retest
+def build_trade_signal(pair: str, candles_1h: List[Dict], strength_data: Dict[str, int], debug: bool = False) -> Optional[Dict]:
     h1_breakout = check_breakout_h1(pair, candles_1h, strength_data)
     yest_breakout = check_breakout_yesterday(pair, candles_1h, strength_data)
     breakout_info = h1_breakout or yest_breakout
@@ -51,55 +54,51 @@ def build_trade_signal(pair: str, candles_1h: List[Dict], strength_data: Dict[st
         return None
     breakout_level, _original_direction, _ = breakout_info
 
-    # Strength diff
     base, quote = pair.split("_")
     base_strength = strength_data.get(base, 0)
     quote_strength = strength_data.get(quote, 0)
     strength_diff = abs(base_strength - quote_strength)
-
-    # Only trigger exact points [10,12,14]
     if strength_diff not in [10, 12, 14]:
         return None
 
-    # Align strong → weak
     if base_strength >= quote_strength:
+        alert_direction = "buy"
         strong_curr, strong_val = base, base_strength
         weak_curr, weak_val = quote, quote_strength
-        alert_direction = "buy"
     else:
+        alert_direction = "sell"
         strong_curr, strong_val = quote, quote_strength
         weak_curr, weak_val = base, base_strength
-        alert_direction = "sell"
 
-    # Entry, SL, TP
     atr_val = atr(candles_1h)
-    entry = get_recent_candles(pair, "M15", 1)[-1]["close"]
+
+    # Safe entry fetch
+    m15_candles = get_recent_candles(pair, "M15", 1)
+    if not m15_candles:
+        if debug:
+            logger.info(f"No M15 candles for {pair}, skipping trade signal")
+        return None
+    entry = m15_candles[-1]["close"]
+
     if alert_direction == "buy":
         stop_loss = entry - atr_val
-        tp1 = entry + atr_val * 2
-        tp2 = entry + atr_val * 4
-        tp3 = entry + atr_val * 6
+        tp1, tp2, tp3 = entry + atr_val * 2, entry + atr_val * 4, entry + atr_val * 6
     else:
         stop_loss = entry + atr_val
-        tp1 = entry - atr_val * 2
-        tp2 = entry - atr_val * 4
-        tp3 = entry - atr_val * 6
+        tp1, tp2, tp3 = entry - atr_val * 2, entry - atr_val * 4, entry - atr_val * 6
 
-    # ✅ Verify M15 retest at actual breakout level
+    # Only log skipped M15 retests in debug mode
     if not check_retest_confirmation(pair, breakout_level, alert_direction):
-        logger.info(f"Skipping {pair}: M15 retest not confirmed")
+        if debug:
+            logger.info(f"Skipping {pair}: M15 retest not confirmed")
         return None
 
-    # Minimum RRR filter
     rrr = calculate_rrr(entry, stop_loss, tp1)
     if rrr < MIN_RRR:
         return None
 
-    # Format strengths with + / - signs
     strong_str = f"{strong_curr}:{'+' if strong_val > 0 else ''}{strong_val}"
     weak_str = f"{weak_curr}:{'+' if weak_val > 0 else ''}{weak_val}"
-
-    # Send alert
     symbol = "🟢 BUY" if alert_direction == "buy" else "🔴 SELL"
     alert_msg = f"""{symbol} {pair} [strength_alert]
 Scenario: {scenario}
@@ -110,7 +109,6 @@ TPs: TP1:{tp1:.5f}, TP2:{tp2:.5f}, TP3:{tp3:.5f} | Min RRR:1:{MIN_RRR}
 Timeframes: {{'breakout':'H1','retest':'M15'}}"""
     send_telegram(alert_msg)
 
-    # Save triggered trade
     _ACTIVE_TRADES.append({
         "pair": pair,
         "direction": alert_direction,
@@ -125,7 +123,7 @@ Timeframes: {{'breakout':'H1','retest':'M15'}}"""
     return _ACTIVE_TRADES[-1]
 
 # ---------------- Main Loop ----------------
-def run_trade_signal_loop(strength_data: Dict[str, int]):
+def run_trade_signal_loop(strength_data: Dict[str, int], debug: bool = False):
     global _ACTIVE_TRADES, _LAST_ALERT_TIME
     now = time.time()
     triggered_pair = None
@@ -138,9 +136,11 @@ def run_trade_signal_loop(strength_data: Dict[str, int]):
             continue
         candles_1h = get_recent_candles(pair, "H1", 50)
         if not candles_1h:
+            if debug:
+                logger.info(f"No H1 candles for {pair}, skipping")
             continue
         try:
-            result = build_trade_signal(pair, candles_1h, strength_data)
+            result = build_trade_signal(pair, candles_1h, strength_data, debug=debug)
             if result:
                 _LAST_ALERT_TIME[pair] = now
                 triggered_pair = pair

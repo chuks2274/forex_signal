@@ -32,11 +32,11 @@ def check_breakout_h1(pair, candles_h1=None, rank_map=None):
     try:
         if candles_h1 is None:
             candles_h1 = get_recent_candles(pair, "H1", 1)
-        if not candles_h1:
+        if not candles_h1 or "close" not in candles_h1[-1]:
             return None
 
         daily = get_recent_candles(pair, "D", 2)
-        if not daily or len(daily) < 2:
+        if not daily or len(daily) < 2 or "high" not in daily[-2] or "low" not in daily[-2]:
             return None
 
         prev_high, prev_low = daily[-2]["high"], daily[-2]["low"]
@@ -64,13 +64,15 @@ def check_breakout_yesterday(pair, candles_h1=None, rank_map=None):
             return None
 
         daily = get_recent_candles(pair, "D", 2)
-        if not daily or len(daily) < 2:
+        if not daily or len(daily) < 2 or "high" not in daily[-2] or "low" not in daily[-2]:
             return None
 
         prev_high, prev_low = daily[-2]["high"], daily[-2]["low"]
 
         for candle in candles_h1:
-            close = candle["close"]
+            close = candle.get("close")
+            if close is None:
+                continue
             if close > prev_high:
                 return (prev_high, "buy", None)
             elif close < prev_low:
@@ -98,7 +100,7 @@ def run_group_breakout_alert(min_pairs=4, send_alert_fn=None, group_cooldown=360
         for pair in pairs:
             try:
                 breakout_info = check_breakout_h1(pair)
-                if breakout_info:
+                if breakout_info and breakout_info[0] is not None:
                     breakout_pairs.append(pair)
             except Exception as e:
                 logger.error(f"{pair} group breakout check error: {e}")
@@ -110,7 +112,10 @@ def run_group_breakout_alert(min_pairs=4, send_alert_fn=None, group_cooldown=360
                 alerts[group] = breakout_pairs
                 _last_group_alerts[group] = now
                 if send_alert_fn:
-                    msg = f"📢 {group} Group Breakout Alert! ({len(breakout_pairs)} pairs)\n" + "\n".join(sorted(breakout_pairs))
+                    msg = (
+                        f"📢 {group} Group Breakout Alert! ({len(breakout_pairs)} pairs)\n"
+                        + "\n".join(sorted(breakout_pairs))
+                    )
                     send_alert_fn(msg)
 
     return alerts

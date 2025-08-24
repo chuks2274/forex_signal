@@ -14,11 +14,14 @@ logger = logging.getLogger("forex_bot")
 logger.setLevel(logging.INFO)
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s")
 
+# ---------------- Config ----------------
+DEBUG_MODE = False  # Set True to log skipped M15 retests
+GROUP_BREAKOUT_COOLDOWN = 3600  # 1 hour per group
+HEARTBEAT_COOLDOWN = 24 * 3600  # once per day
+
 # ---------------- Cooldown Trackers ----------------
 last_trade_alert_times = {}  # key = (pair, "strength_alert")
 last_heartbeat_time = 0
-GROUP_BREAKOUT_COOLDOWN = 3600  # 1 hour per group
-HEARTBEAT_COOLDOWN = 24 * 3600  # once per day
 
 # ---------------- Heartbeat ----------------
 def send_heartbeat():
@@ -37,7 +40,7 @@ def trade_signal_thread():
             filtered_strength, _ = run_currency_strength_alert(
                 last_trade_alert_times=last_trade_alert_times,
             )
-            run_trade_signal_loop(filtered_strength)
+            run_trade_signal_loop(filtered_strength, debug=DEBUG_MODE)
         except Exception as e:
             logger.error(f"Unexpected error in trade loop: {e}")
         time.sleep(60)

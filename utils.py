@@ -5,6 +5,8 @@ from datetime import datetime
 import pandas as pd
 import json
 import os
+import time
+from requests.exceptions import RequestException
 
 from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, OANDA_API, HEADERS
 
@@ -23,27 +25,39 @@ def send_telegram(message: str) -> bool:
         logger.error(f"Failed to send telegram message: {e}")
         return False
 
-# ================= OANDA CANDLES =================
-def fetch_oanda_candles(pair: str, granularity: str = "H1", count: int = 30) -> list:
-    """Fetch raw candles from OANDA API (unprocessed)."""
-    try:
-        url = f"{OANDA_API}/instruments/{pair}/candles"
-        params = {"granularity": granularity, "count": count, "price": "M"}
-        r = requests.get(url, headers=HEADERS, params=params)
-        r.raise_for_status()
-        return r.json().get("candles", [])
-    except Exception as e:
-        logger.error(f"Failed to fetch OANDA candles for {pair} at {granularity}: {e}")
-        return []
+# ================= OANDA CANDLES WITH RETRIES =================
+def fetch_oanda_candles(pair: str, granularity: str = "H1", count: int = 30, max_retries: int = 3, backoff: float = 1.5) -> list:
+    """
+    Fetch raw candles from OANDA API with retry and exponential backoff.
+    Returns an empty list if all attempts fail.
+    """
+    url = f"{OANDA_API}/instruments/{pair}/candles"
+    params = {"granularity": granularity, "count": count, "price": "M"}
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = requests.get(url, headers=HEADERS, params=params, timeout=10)
+            r.raise_for_status()
+            return r.json().get("candles", [])
+        except RequestException as e:
+            wait_time = backoff ** attempt
+            logger.warning(f"[Attempt {attempt}/{max_retries}] Failed to fetch {pair} candles ({granularity}): {e}. Retrying in {wait_time:.1f}s...")
+            time.sleep(wait_time)
+        except Exception as e:
+            logger.error(f"Unexpected error fetching {pair} candles ({granularity}): {e}")
+            break
+
+    logger.error(f"Failed to fetch OANDA candles for {pair} at {granularity} after {max_retries} attempts.")
+    return []
 
 def get_recent_candles(pair: str, timeframe: str = "H1", count: int = 30) -> list[dict]:
     """
-    Fetch candles and normalize to dicts:
-    {"time", "open", "high", "low", "close"}
+    Fetch candles and normalize to dicts: {"time", "open", "high", "low", "close"}.
     Works with OANDA JSON or tuple/list candle formats.
     """
     raw_candles = fetch_oanda_candles(pair, timeframe, count)
     normalized = []
+
     for c in raw_candles:
         if isinstance(c, dict):
             mid = c.get("mid", c)
@@ -63,6 +77,10 @@ def get_recent_candles(pair: str, timeframe: str = "H1", count: int = 30) -> lis
             })
         else:
             logger.warning(f"Skipped malformed candle for {pair}: {c}")
+
+    if not normalized:
+        logger.warning(f"No valid candles returned for {pair} ({timeframe}).")
+
     return normalized
 
 # Alias for backward compatibility
@@ -116,7 +134,6 @@ def rsi(closes: list, period: int = 14) -> list:
     return rsis
 
 def calculate_atr(candles: list, period: int = 14) -> float:
-    """Calculate Average True Range (ATR) for trade_signal.py."""
     if len(candles) < period + 1:
         return 0.001
     trs = [
@@ -128,7 +145,6 @@ def calculate_atr(candles: list, period: int = 14) -> float:
     return float(sum(trs[-period:]) / period)
 
 def calculate_rsi(closes: list, period: int = 14) -> list:
-    """Calculate RSI for trade_signal.py."""
     if len(closes) < period + 1:
         return [50] * len(closes)
     deltas = [closes[i + 1] - closes[i] for i in range(len(closes) - 1)]
