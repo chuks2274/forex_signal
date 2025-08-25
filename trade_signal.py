@@ -12,6 +12,8 @@ _ACTIVE_TRADES: List[Dict] = load_active_trades()
 _LAST_ALERT_TIME: Dict[str, float] = {}
 
 MIN_RRR = 2.0  # Minimum 1:2 risk-to-reward
+MIN_STRONG = 5
+MAX_WEAK = -5
 
 # ---------------- Retest Check ----------------
 def check_retest_confirmation(pair: str, breakout_level: float, direction: str) -> bool:
@@ -36,6 +38,39 @@ def check_retest_confirmation(pair: str, breakout_level: float, direction: str) 
             return True
         elif direction == "sell" and abs(high - breakout_level) <= tolerance and close < candle["open"] and rsi_val > 30:
             return True
+    return False
+
+# ---------------- RSI Filter for Pullback Entries ----------------
+def rsi_filter(pair: str, direction: str) -> bool:
+    """Trend filter: H1 RSI + M15 pullback cross logic"""
+    h1 = get_recent_candles(pair, "H1", 100)
+    m15 = get_recent_candles(pair, "M15", 100)
+    if not h1 or not m15:
+        return False
+
+    h1_closes = [c["close"] for c in h1]
+    m15_closes = [c["close"] for c in m15]
+
+    h1_rsi = rsi(h1_closes)[-1]
+    m15_rsi_series = rsi(m15_closes)
+    if not m15_rsi_series or len(m15_rsi_series) < 2:
+        return False
+
+    last_rsi = m15_rsi_series[-1]
+    prev_rsi = m15_rsi_series[-2]
+
+    if direction == "buy" and h1_rsi >= 55:
+        if last_rsi >= 50:
+            return True
+        if prev_rsi < 50 and last_rsi >= 50:
+            return True
+
+    if direction == "sell" and h1_rsi <= 45:
+        if last_rsi <= 50:
+            return True
+        if prev_rsi > 50 and last_rsi <= 50:
+            return True
+
     return False
 
 # ---------------- Risk-to-Reward ----------------
@@ -70,6 +105,12 @@ def build_trade_signal(pair: str, candles_1h: List[Dict], strength_data: Dict[st
         strong_curr, strong_val = quote, quote_strength
         weak_curr, weak_val = base, base_strength
 
+    # ---------------- FILTER ±5/-5 STRENGTH ----------------
+    if strong_val < MIN_STRONG or weak_val > MAX_WEAK:
+        if debug:
+            logger.info(f"Skipping {pair}: strength values below +5/-5 threshold")
+        return None
+
     atr_val = atr(candles_1h)
 
     # Safe entry fetch
@@ -87,18 +128,26 @@ def build_trade_signal(pair: str, candles_1h: List[Dict], strength_data: Dict[st
         stop_loss = entry + atr_val
         tp1, tp2, tp3 = entry - atr_val * 2, entry - atr_val * 4, entry - atr_val * 6
 
-    # Only log skipped M15 retests in debug mode
+    # Check retest
     if not check_retest_confirmation(pair, breakout_level, alert_direction):
         if debug:
             logger.info(f"Skipping {pair}: M15 retest not confirmed")
+        return None
+
+    # Check H1 + M15 RSI filter
+    if not rsi_filter(pair, alert_direction):
+        if debug:
+            logger.info(f"Skipping {pair}: RSI filter not confirmed")
         return None
 
     rrr = calculate_rrr(entry, stop_loss, tp1)
     if rrr < MIN_RRR:
         return None
 
-    strong_str = f"{strong_curr}:{'+' if strong_val > 0 else ''}{strong_val}"
-    weak_str = f"{weak_curr}:{'+' if weak_val > 0 else ''}{weak_val}"
+    # ---------------- FIXED STRENGTH FORMATTING ----------------
+    strong_str = f"{strong_curr}:{strong_val:+d}"  
+    weak_str = f"{weak_curr}:{weak_val:+d}"      
+
     symbol = "🟢 BUY" if alert_direction == "buy" else "🔴 SELL"
     alert_msg = f"""{symbol} {pair} [strength_alert]
 Scenario: {scenario}
@@ -124,29 +173,35 @@ Timeframes: {{'breakout':'H1','retest':'M15'}}"""
 
 # ---------------- Main Loop ----------------
 def run_trade_signal_loop(strength_data: Dict[str, int], debug: bool = False):
+    """
+    Loop through all pairs and trigger trade alerts for all valid setups.
+    Respects ALERT_COOLDOWN per pair.
+    """
     global _ACTIVE_TRADES, _LAST_ALERT_TIME
     now = time.time()
-    triggered_pair = None
+    trades_triggered = 0
 
     for pair in PAIRS:
-        if triggered_pair:
-            break
         last_ts = _LAST_ALERT_TIME.get(pair, 0)
         if now - last_ts < ALERT_COOLDOWN:
             continue
+
         candles_1h = get_recent_candles(pair, "H1", 50)
         if not candles_1h:
             if debug:
                 logger.info(f"No H1 candles for {pair}, skipping")
             continue
+
         try:
             result = build_trade_signal(pair, candles_1h, strength_data, debug=debug)
             if result:
                 _LAST_ALERT_TIME[pair] = now
-                triggered_pair = pair
+                trades_triggered += 1
+                if debug:
+                    logger.info(f"Trade triggered for {pair}")
         except Exception as e:
             logger.error(f"Error building trade signal for {pair}: {e}")
 
-    if triggered_pair:
+    if trades_triggered > 0:
         save_active_trades(_ACTIVE_TRADES)
-        logger.info("Trade alerts saved")
+        logger.info(f"{trades_triggered} trade(s) alerts saved")
