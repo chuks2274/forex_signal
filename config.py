@@ -29,6 +29,20 @@ except Exception as e:
     logging.error(f"Error loading TIMEFRAMES: {e}")
     TIMEFRAMES = ["H1", "H4", "D"]
 
+# --- RSI Settings ---
+try:
+    RSI_PERIOD = int(os.getenv("RSI_PERIOD", 14))  # default 14-period RSI
+except Exception as e:
+    logging.error(f"Error loading RSI_PERIOD: {e}")
+    RSI_PERIOD = 14
+
+# --- Loop interval in seconds ---
+try:
+    LOOP_INTERVAL = int(os.getenv("LOOP_INTERVAL", 60))  # 60 seconds default
+except Exception as e:
+    logging.error(f"Error loading LOOP_INTERVAL: {e}")
+    LOOP_INTERVAL = 60
+
 # --- HTTP headers for OANDA API requests ---
 HEADERS = {"Authorization": f"Bearer {OANDA_TOKEN}"}
 

@@ -1,6 +1,6 @@
 import logging
 import time
-from utils import get_recent_candles, send_telegram
+from utils import get_recent_candles
 from config import PAIRS
 
 logger = logging.getLogger("breakout")

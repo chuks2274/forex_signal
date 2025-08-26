@@ -25,15 +25,13 @@ def send_telegram(message: str) -> bool:
         logger.error(f"Failed to send telegram message: {e}")
         return False
 
-# ================= OANDA CANDLES WITH RETRIES =================
+# Alias for backward compatibility
+send_alert = send_telegram
+
+# ================= OANDA CANDLES =================
 def fetch_oanda_candles(pair: str, granularity: str = "H1", count: int = 30, max_retries: int = 3, backoff: float = 1.5) -> list:
-    """
-    Fetch raw candles from OANDA API with retry and exponential backoff.
-    Returns an empty list if all attempts fail.
-    """
     url = f"{OANDA_API}/instruments/{pair}/candles"
     params = {"granularity": granularity, "count": count, "price": "M"}
-
     for attempt in range(1, max_retries + 1):
         try:
             r = requests.get(url, headers=HEADERS, params=params, timeout=10)
@@ -46,18 +44,12 @@ def fetch_oanda_candles(pair: str, granularity: str = "H1", count: int = 30, max
         except Exception as e:
             logger.error(f"Unexpected error fetching {pair} candles ({granularity}): {e}")
             break
-
     logger.error(f"Failed to fetch OANDA candles for {pair} at {granularity} after {max_retries} attempts.")
     return []
 
 def get_recent_candles(pair: str, timeframe: str = "H1", count: int = 30) -> list[dict]:
-    """
-    Fetch candles and normalize to dicts: {"time", "open", "high", "low", "close"}.
-    Works with OANDA JSON or tuple/list candle formats.
-    """
     raw_candles = fetch_oanda_candles(pair, timeframe, count)
     normalized = []
-
     for c in raw_candles:
         if isinstance(c, dict):
             mid = c.get("mid", c)
@@ -75,15 +67,9 @@ def get_recent_candles(pair: str, timeframe: str = "H1", count: int = 30) -> lis
                 "low": float(c[2]),
                 "close": float(c[3])
             })
-        else:
-            logger.warning(f"Skipped malformed candle for {pair}: {c}")
-
-    if not normalized:
-        logger.warning(f"No valid candles returned for {pair} ({timeframe}).")
-
     return normalized
 
-# Alias for backward compatibility
+# Alias
 get_candles = get_recent_candles
 
 # ================= TECHNICAL INDICATORS =================
@@ -117,12 +103,9 @@ def rsi(closes: list, period: int = 14) -> list:
     deltas = [closes[i + 1] - closes[i] for i in range(len(closes) - 1)]
     gains = [max(delta, 0) for delta in deltas]
     losses = [abs(min(delta, 0)) for delta in deltas]
-
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
-
     rsis = [100 if avg_loss == 0 else 100 - (100 / (1 + (avg_gain / avg_loss)))]
-
     for i in range(period, len(gains)):
         gain = gains[i]
         loss = losses[i]
@@ -130,41 +113,10 @@ def rsi(closes: list, period: int = 14) -> list:
         avg_loss = (avg_loss * (period - 1) + loss) / period
         rs = avg_gain / avg_loss if avg_loss != 0 else float('inf')
         rsis.append(100 - (100 / (1 + rs)))
-
     return rsis
 
-def calculate_atr(candles: list, period: int = 14) -> float:
-    if len(candles) < period + 1:
-        return 0.001
-    trs = [
-        max(candles[i]["high"] - candles[i]["low"],
-            abs(candles[i]["high"] - candles[i - 1]["close"]),
-            abs(candles[i]["low"] - candles[i - 1]["close"]))
-        for i in range(1, len(candles))
-    ]
-    return float(sum(trs[-period:]) / period)
-
-def calculate_rsi(closes: list, period: int = 14) -> list:
-    if len(closes) < period + 1:
-        return [50] * len(closes)
-    deltas = [closes[i + 1] - closes[i] for i in range(len(closes) - 1)]
-    gains = [max(delta, 0) for delta in deltas]
-    losses = [abs(min(delta, 0)) for delta in deltas]
-
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-
-    rsis = [100 if avg_loss == 0 else 100 - (100 / (1 + (avg_gain / avg_loss)))]
-
-    for i in range(period, len(gains)):
-        gain = gains[i]
-        loss = losses[i]
-        avg_gain = (avg_gain * (period - 1) + gain) / period
-        avg_loss = (avg_loss * (period - 1) + loss) / period
-        rs = avg_gain / avg_loss if avg_loss != 0 else float('inf')
-        rsis.append(100 - (100 / (1 + rs)))
-
-    return rsis
+def get_rsi(closes: list, period: int = 14) -> list:
+    return rsi(closes, period)
 
 def ema_slope(closes: list, period: int = 10) -> float:
     if len(closes) < period + 2:
@@ -174,31 +126,30 @@ def ema_slope(closes: list, period: int = 10) -> float:
     slope = ema_series.iloc[-1] - ema_series.iloc[-2]
     return slope
 
-# ================= SWING POINTS =================
-def find_swing_points(candles: list) -> tuple:
-    highs = [c["high"] for c in candles]
-    lows = [c["low"] for c in candles]
+# ================= CURRENT PRICE =================
+def get_current_price(pair: str) -> float:
+    candles = get_recent_candles(pair, "M1", count=1)
+    if candles:
+        return candles[-1]["close"]
+    return 0.0
 
-    swing_highs = []
-    swing_lows = []
+# ================= CURRENCY STRENGTH =================
+def get_currency_strength(pairs: list) -> dict:
+    strengths = {}
+    for p in pairs:
+        base, quote = p.split("_")
+        price = get_current_price(p)
+        strengths[base] = strengths.get(base, 0) + price
+        strengths[quote] = strengths.get(quote, 0) - price
+    return strengths
 
-    for i in range(1, len(candles) - 1):
-        if highs[i] > highs[i - 1] and highs[i] > highs[i + 1]:
-            swing_highs.append(highs[i])
-        if lows[i] < lows[i - 1] and lows[i] < lows[i + 1]:
-            swing_lows.append(lows[i])
-
-    return swing_highs, swing_lows
-
-# ================= SESSION DETECTION =================
+# ================= SESSION =================
 def get_current_session(now_utc=None) -> str:
     if now_utc is None:
         now_utc = datetime.utcnow()
-
     ny_tz = pytz.timezone("America/New_York")
     now_ny = now_utc.replace(tzinfo=pytz.utc).astimezone(ny_tz)
     hour = now_ny.hour
-
     if 0 <= hour < 8:
         return "Asian"
     elif 8 <= hour < 16:
@@ -216,7 +167,7 @@ def load_active_trades():
         with open(ACTIVE_TRADES_FILE, "r") as f:
             return json.load(f)
     except Exception as e:
-        logger.error(f"[Utils] Failed to load active trades: {e}")
+        logger.error(f"Failed to load active trades: {e}")
         return []
 
 def save_active_trades(trades):
@@ -224,4 +175,4 @@ def save_active_trades(trades):
         with open(ACTIVE_TRADES_FILE, "w") as f:
             json.dump(trades, f)
     except Exception as e:
-        logger.error(f"[Utils] Failed to save active trades: {e}")
+        logger.error(f"Failed to save active trades: {e}")
