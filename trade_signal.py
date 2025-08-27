@@ -26,10 +26,10 @@ _LAST_ALERT_TIME: Dict[str, float] = {}
 MIN_RRR = 2.0
 MIN_STRONG = 5
 MAX_WEAK = -5
-RANGE_LOOKBACK = 10  # M15 candles for range confirmation
-ATTEMPTS_NEEDED = 2  # failed breakout attempts
-MIN_SR_BUFFER = 0.3  # min ATR multiplier for H1 SR filter
-MAX_SR_BUFFER = 1.0  # max ATR multiplier for H1 SR filter
+RANGE_LOOKBACK = 10   # M15 candles for range confirmation
+ATTEMPTS_NEEDED = 1   # only 1 rejection needed
+MIN_SR_BUFFER = 0.3
+MAX_SR_BUFFER = 1.0
 
 # ---------------- Retest Check ----------------
 def check_retest_confirmation(pair: str, breakout_level: float, direction: str) -> bool:
@@ -40,7 +40,7 @@ def check_retest_confirmation(pair: str, breakout_level: float, direction: str) 
     if len(closes) < 5:
         return False
     atr_val = atr(m15)
-    tolerance = atr_val * 0.5
+    tolerance = atr_val * 1.0   # loosened tolerance
     rsi_series = get_rsi_series(closes)
     if len(rsi_series) < 5:
         return False
@@ -62,11 +62,6 @@ def get_rsi_series(closes: List[float]) -> List[float]:
 
 # ---------------- Range Confirmation ----------------
 def confirm_m15_range(pair: str, direction: str, lookback: int = RANGE_LOOKBACK, attempts_needed: int = ATTEMPTS_NEEDED) -> bool:
-    """
-    Stateless range confirmation:
-    - SELL: buyers test swing high >= attempts_needed times but fail to close above
-    - BUY: sellers test swing low >= attempts_needed times but fail to close below
-    """
     m15 = get_recent_candles(pair, "M15", lookback)
     if not m15 or len(m15) < lookback:
         return False
@@ -95,7 +90,6 @@ def confirm_m15_range(pair: str, direction: str, lookback: int = RANGE_LOOKBACK,
 
 # ---------------- H1 SR Filter ----------------
 def get_dynamic_sr_buffer(strength_diff: int, atr_val: float, min_buffer: float = MIN_SR_BUFFER, max_buffer: float = MAX_SR_BUFFER):
-    """Dynamic H1 SR buffer based on strength difference"""
     if strength_diff >= 14:
         buffer_multiplier = min_buffer
     elif strength_diff <= 10:
@@ -105,17 +99,17 @@ def get_dynamic_sr_buffer(strength_diff: int, atr_val: float, min_buffer: float 
     return buffer_multiplier * atr_val
 
 def confirm_h1_sr_filter(pair: str, direction: str, h1_pivots: List[float], strength_diff: int) -> bool:
-    """Prevents trade too close to H1 pivots"""
+    if not h1_pivots:  # safety: no pivots
+        return True
     candles_1h = get_recent_candles(pair, "H1", 20)
     if not candles_1h:
         return False
     last_close = candles_1h[-1]["close"]
     atr_val = atr(candles_1h)
     buffer = get_dynamic_sr_buffer(strength_diff, atr_val)
-
     for pivot in h1_pivots:
         if abs(last_close - pivot) <= buffer:
-            return False  # too close to SR
+            return False
     return True
 
 # ---------------- Build Trade Signal ----------------
@@ -134,14 +128,15 @@ def build_trade_signal(pair: str, strength_data: Dict[str, int], debug: bool = F
     scenario = "Breakout Today" if h1_breakout else "Breakout Yesterday + Retest"
     if not breakout_info:
         return None
-    breakout_level, _, h1_pivots = breakout_info  # assume check_breakout returns pivot list
+
+    breakout_level, _, h1_pivots = breakout_info
+    h1_pivots = h1_pivots or []  # ✅ pivot-safe
 
     base, quote = pair.split("_")
     base_strength = strength_data.get(base, 0)
     quote_strength = strength_data.get(quote, 0)
     strength_diff = abs(base_strength - quote_strength)
 
-    # Direction
     if base_strength >= quote_strength:
         direction = "buy"
         strong_curr, strong_val = base, base_strength
@@ -151,7 +146,8 @@ def build_trade_signal(pair: str, strength_data: Dict[str, int], debug: bool = F
         strong_curr, strong_val = quote, quote_strength
         weak_curr, weak_val = base, base_strength
 
-    if strong_val < MIN_STRONG or weak_val > -MAX_WEAK or strength_diff not in [10,12,14]:
+    # Strength filter
+    if strong_val < MIN_STRONG or weak_val > -MAX_WEAK or strength_diff < 10:
         return None
 
     # H1 SR filter
@@ -174,7 +170,7 @@ def build_trade_signal(pair: str, strength_data: Dict[str, int], debug: bool = F
     if not check_retest_confirmation(pair, breakout_level, direction):
         return None
 
-    # RSI Pullback + Crossback
+    # M15 RSI Pullback + Crossback (looser)
     m15_candles_full = get_recent_candles(pair, "M15", 100)
     last_rsi = get_rsi_series([c["close"] for c in m15_candles_full])[-1] if m15_candles_full else None
     prev_rsi = prev_m15_rsi.get(pair)
@@ -183,15 +179,15 @@ def build_trade_signal(pair: str, strength_data: Dict[str, int], debug: bool = F
 
     if last_rsi is not None:
         if direction == "buy":
-            if last_rsi < 45:
+            if last_rsi < 50:
                 flags["buy"] = True
-            elif flags["buy"] and prev_rsi is not None and prev_rsi < 45 and last_rsi >= 45:
+            elif flags["buy"] and prev_rsi is not None and prev_rsi < 50 and last_rsi >= 50:
                 signal = "BUY"
                 flags["buy"] = False
         elif direction == "sell":
-            if last_rsi > 55:
+            if last_rsi > 50:
                 flags["sell"] = True
-            elif flags["sell"] and prev_rsi is not None and prev_rsi > 55 and last_rsi <= 55:
+            elif flags["sell"] and prev_rsi is not None and prev_rsi > 50 and last_rsi <= 50:
                 signal = "SELL"
                 flags["sell"] = False
         prev_m15_rsi[pair] = last_rsi
@@ -199,7 +195,7 @@ def build_trade_signal(pair: str, strength_data: Dict[str, int], debug: bool = F
     if signal != direction.upper():
         return None
 
-    # M15 range confirmation
+    # M15 range confirmation (only 1 rejection needed)
     if not confirm_m15_range(pair, direction):
         return None
 
