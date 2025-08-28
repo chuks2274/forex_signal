@@ -66,13 +66,24 @@ def format_strength_alert(rank_map):
         msg += f"{cur}: {sign}{rank}\n"
     return msg
 
+# ---------------- Strength Filter ----------------
+def strength_filter(strong_val, weak_val):
+    return (
+        (strong_val == 7 and weak_val == -7) or
+        (strong_val == 7 and weak_val == -5) or
+        (strong_val == 5 and weak_val == -5) or
+        (weak_val == -7 and strong_val == 7) or
+        (weak_val == -7 and strong_val == 5) or
+        (weak_val == -5 and strong_val == 5)
+    )
+
 # ---------------- Runner ----------------
-def run_currency_strength_alert(last_alert_time: float = None, last_trade_alert_times: dict = None):
+def run_currency_strength_alert(last_trade_alert_times: dict = None):
     global _last_strength_alert_time
     now_ts = time.time()
 
     with _strength_alert_lock:
-        # Skip if full alert is on cooldown
+        # Cooldown check
         if now_ts - _last_strength_alert_time < STRENGTH_ALERT_COOLDOWN:
             rank_map = calculate_strength()
             return rank_map, _last_strength_alert_time
@@ -82,17 +93,17 @@ def run_currency_strength_alert(last_alert_time: float = None, last_trade_alert_
             if not rank_map:
                 return {}, _last_strength_alert_time
 
-            # Send full alert
+            # Send full ranking alert
             alert_msg = format_strength_alert(rank_map)
             if send_telegram(alert_msg):
                 logger.info("✅ Sent full currency strength alert")
                 _last_strength_alert_time = now_ts
 
-            # Filter strong vs weak currencies only
+            # Filter for strong/weak currencies
             filtered_currencies = {cur: val for cur, val in rank_map.items() if abs(val) >= 5}
 
+            # Determine top candidate pair
             if filtered_currencies and last_trade_alert_times is not None:
-                # Sort pairs by descending strength_diff
                 candidate_pairs = []
                 for pair in PAIRS:
                     if "_" not in pair:
@@ -102,24 +113,48 @@ def run_currency_strength_alert(last_alert_time: float = None, last_trade_alert_
                     quote_val = filtered_currencies.get(quote)
                     if base_val is None or quote_val is None:
                         continue
+
+                    strong_val, weak_val = (base_val, quote_val) if abs(base_val) >= abs(quote_val) else (quote_val, base_val)
+                    if not strength_filter(strong_val, weak_val):
+                        continue
+
+                    # H1 breakout confirmation
+                    candles_h1 = get_recent_candles(pair, "H1", 50)
+                    if not candles_h1:
+                        continue
+                    breakout_info = check_breakout_h1(pair, candles_h1, rank_map)
+                    if not breakout_info:
+                        continue
+
+                    # M15 RSI confirmation
+                    m15_candles = get_recent_candles(pair, "M15", 50)
+                    if not m15_candles:
+                        continue
+                    m15_close_prices = [float(c["close"]) for c in m15_candles]
+                    m15_rsi_values = rsi(m15_close_prices)
+                    if not m15_rsi_values:
+                        continue
+                    m15_rsi = m15_rsi_values[-1]
+
+                    direction = "buy" if base_val > quote_val else "sell"
+                    if direction == "buy" and m15_rsi <= 50:
+                        continue
+                    if direction == "sell" and m15_rsi >= 50:
+                        continue
+
                     strength_diff = abs(base_val - quote_val)
                     candidate_pairs.append((strength_diff, pair, base_val, quote_val))
 
+                # Trigger only the top candidate
                 candidate_pairs.sort(reverse=True, key=lambda x: x[0])
-
-                # Trigger only the **top pair**
                 if candidate_pairs:
                     _, pair, base_val, quote_val = candidate_pairs[0]
-
                     signal_type = "BUY" if base_val > 0 and quote_val < 0 else "SELL"
-                    candles_h1 = get_recent_candles(pair, "H1", 50)
-                    breakout_info = check_breakout_h1(pair, candles_h1, rank_map)
-                    if breakout_info:
-                        key = (pair, "strength_alert")
-                        last_pair_ts = last_trade_alert_times.get(key, 0)
-                        if now_ts - last_pair_ts >= STRENGTH_ALERT_COOLDOWN:
-                            last_trade_alert_times[key] = now_ts
-                            logger.info(f"💹 Trade Alert: {signal_type} {pair} | Strength Diff: {abs(base_val - quote_val)}")
+                    key = (pair, "strength_alert")
+                    last_pair_ts = last_trade_alert_times.get(key, 0)
+                    if now_ts - last_pair_ts >= STRENGTH_ALERT_COOLDOWN:
+                        last_trade_alert_times[key] = now_ts
+                        logger.info(f"💹 Top Candidate Trade Alert: {signal_type} {pair} | Strength Diff: {abs(base_val - quote_val)}")
 
             return filtered_currencies, _last_strength_alert_time
 

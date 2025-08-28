@@ -5,12 +5,12 @@ import os
 import json
 from config import STRENGTH_ALERT_COOLDOWN
 from utils import send_telegram
-from trade_signal import run_trade_signal_loop
+from trade_signal import run_trade_signal_loop_async
 from currency_strength import run_currency_strength_alert
 from forex_news_alert import run_news_alert_loop, alerted_events
 from breakout import run_group_breakout_alert
 
-# ---------------- Logging ----------------
+# ---------------- Logger ----------------
 logger = logging.getLogger("forex_bot")
 logger.setLevel(logging.INFO)
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s")
@@ -41,7 +41,6 @@ if os.path.exists(STATE_FILE):
 
 # ---------------- Save State ----------------
 def save_state():
-    """Save important bot state before shutdown."""
     try:
         state = {
             "last_trade_alert_times": last_trade_alert_times,
@@ -56,12 +55,9 @@ def save_state():
 # ---------------- Heartbeat Loop ----------------
 async def send_heartbeat_loop():
     global last_heartbeat_time
-
-    # Send initial heartbeat immediately
     if await asyncio.to_thread(send_telegram, "💓 Bot Heartbeat: Forex bot is running"):
         logger.info("✅ Sent initial Bot Heartbeat alert")
         last_heartbeat_time = time.time()
-
     while not shutdown_event.is_set():
         now = time.time()
         if now - last_heartbeat_time >= HEARTBEAT_COOLDOWN:
@@ -74,6 +70,7 @@ async def send_heartbeat_loop():
 async def currency_strength_loop():
     while not shutdown_event.is_set():
         try:
+            # Thread-safe call to synchronous strength alert
             await asyncio.to_thread(run_currency_strength_alert, last_trade_alert_times)
         except Exception as e:
             logger.error(f"Unexpected error in currency strength loop: {e}", exc_info=True)
@@ -95,7 +92,7 @@ async def group_breakout_loop():
 
 # ---------------- Trade Signal Loop ----------------
 async def trade_signal_loop():
-    await asyncio.to_thread(run_trade_signal_loop, debug=DEBUG_MODE)
+    await run_trade_signal_loop_async(debug=DEBUG_MODE)
 
 # ---------------- Main ----------------
 async def main():
@@ -104,7 +101,7 @@ async def main():
     # Start all loops concurrently
     tasks = [
         asyncio.create_task(trade_signal_loop()),
-        asyncio.create_task(run_news_alert_loop(shutdown_event)),  # Pass shutdown_event for graceful exit
+        asyncio.create_task(run_news_alert_loop(shutdown_event)),
         asyncio.create_task(currency_strength_loop()),
         asyncio.create_task(group_breakout_loop()),
         asyncio.create_task(send_heartbeat_loop())
