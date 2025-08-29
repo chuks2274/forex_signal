@@ -82,7 +82,7 @@ async def group_breakout_loop():
         try:
             await asyncio.to_thread(
                 run_group_breakout_alert,
-                min_pairs=4,
+                min_pairs=5,
                 send_alert_fn=send_telegram,
                 group_cooldown=GROUP_BREAKOUT_COOLDOWN
             )

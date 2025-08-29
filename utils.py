@@ -176,3 +176,31 @@ def save_active_trades(trades):
             json.dump(trades, f)
     except Exception as e:
         logger.error(f"Failed to save active trades: {e}")
+        
+# ================= EMA SPACING / CALCULATION =================
+def calculate_ema(prices: list, period: int = 20) -> float:
+    """
+    Calculate the Exponential Moving Average (EMA) for a list of prices.
+    Returns the last EMA value.
+    """
+    if len(prices) < period:
+        return None
+    ema = sum(prices[:period]) / period  # start with SMA
+    multiplier = 2 / (period + 1)
+    for price in prices[period:]:
+        ema = (price - ema) * multiplier + ema
+    return ema
+
+
+def get_ema_spacing(pair: str, fast: int = 20, slow: int = 200) -> float:
+    """
+    Returns the absolute difference between fast EMA and slow EMA for a given pair.
+    """
+    candles = get_recent_candles(pair, "H1", max(fast, slow) + 10)
+    closes = [float(c["close"]) for c in candles]
+    ema_fast = calculate_ema(closes, fast)
+    ema_slow = calculate_ema(closes, slow)
+    if ema_fast is None or ema_slow is None:
+        return 0.0
+    return abs(ema_fast - ema_slow)
+
