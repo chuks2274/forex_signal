@@ -50,10 +50,15 @@ def calculate_strength():
     max_rank, min_rank = 7, -7
     rank_map = {}
     for idx, (cur, _) in enumerate(sorted_scores):
+        # Round to nearest integer and force no zero
         rank = int(round(max_rank - (idx * (max_rank - min_rank) / (n - 1))))
         if rank == 0:
             rank = 1 if idx < n / 2 else -1
         rank_map[cur] = rank
+
+    # Ensure all values are integers
+    for cur in rank_map:
+        rank_map[cur] = int(rank_map[cur])
 
     return rank_map
 
@@ -100,7 +105,7 @@ def run_currency_strength_alert(last_trade_alert_times: dict = None):
                 _last_strength_alert_time = now_ts
 
             # Filter for strong/weak currencies
-            filtered_currencies = {cur: val for cur, val in rank_map.items() if abs(val) >= 5}
+            filtered_currencies = {cur: int(val) for cur, val in rank_map.items() if abs(val) >= 5}
 
             # Determine top candidate pair
             if filtered_currencies and last_trade_alert_times is not None:
@@ -126,24 +131,7 @@ def run_currency_strength_alert(last_trade_alert_times: dict = None):
                     if not breakout_info:
                         continue
 
-                    # M15 RSI confirmation
-                    m15_candles = get_recent_candles(pair, "M15", 50)
-                    if not m15_candles:
-                        continue
-                    m15_close_prices = [float(c["close"]) for c in m15_candles]
-                    m15_rsi_values = rsi(m15_close_prices)
-                    if not m15_rsi_values:
-                        continue
-                    m15_rsi = m15_rsi_values[-1]
-
-                    direction = "buy" if base_val > quote_val else "sell"
-                    if direction == "buy" and m15_rsi <= 50:
-                        continue
-                    if direction == "sell" and m15_rsi >= 50:
-                        continue
-
-                    strength_diff = abs(base_val - quote_val)
-                    candidate_pairs.append((strength_diff, pair, base_val, quote_val))
+                    candidate_pairs.append((abs(strong_val - weak_val), pair, base_val, quote_val))
 
                 # Trigger only the top candidate
                 candidate_pairs.sort(reverse=True, key=lambda x: x[0])
