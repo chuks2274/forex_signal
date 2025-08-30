@@ -96,9 +96,16 @@ def build_trade_signal(pair: str, base_val: int, quote_val: int, rank_map: dict,
 
     # ---------------- Send Alert ----------------
     symbol = "🟢 BUY" if direction == "BUY" else "🔴 SELL"
+
+    # Order strengths correctly depending on direction
+    if direction == "BUY":
+        strengths_text = f"{strong_val:+d}, {weak_val:+d}"
+    else:  # SELL
+        strengths_text = f"{weak_val:+d}, {strong_val:+d}"
+
     alert_msg = (
         f"{symbol} {pair}\n"
-        f"Strength Diff: {abs(strong_val - weak_val)} | Strengths: {strong_val:+d}, {weak_val:+d}\n"
+        f"Strength Diff: {abs(strong_val - weak_val)} | Strengths: {strengths_text}\n"
         f"H1 RSI: {h1_rsi:.1f} | EMA Spacing (20 vs 200): {ema_spacing:.5f}\n"
         f"Breakout: {breakout_text}\n"
         f"Entry: {entry:.5f} | SL: {stop_loss:.5f} | ATR: {atr_val:.5f}\n"
