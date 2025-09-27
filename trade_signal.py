@@ -16,20 +16,20 @@ logging.basicConfig(level=logging.INFO)
 _ACTIVE_TRADES: List[Dict] = load_active_trades()
 _LAST_ALERT_TIME: Dict[str, float] = {}
 MIN_RRR = 2.0
-MAX_EMA_SPACING = 1.0  # in ATR multiples
+MAX_EMA_SPACING = 1.0  # adjust per pair volatility
 ATR_TOUCH_THRESHOLD = 0.5  # price proximity to EMA20
 
 # ---------------- Build Trade Signal ----------------
 def build_trade_signal(pair: str, base_val: int, quote_val: int, rank_map: dict, debug: bool = False) -> Optional[Dict]:
     now = time.time()
 
-    # --- Cooldown check ---
+    # Cooldown check
     if now - _LAST_ALERT_TIME.get(pair, 0) < ALERT_COOLDOWN:
         if debug:
             logger.info(f"Skipped {pair}: Alert cooldown active")
         return None
 
-    # --- Get candles & RSI ---
+    # H1 candles & RSI
     candles_1h = get_recent_candles(pair, "H1", 250)
     if not candles_1h:
         if debug:
@@ -44,7 +44,7 @@ def build_trade_signal(pair: str, base_val: int, quote_val: int, rank_map: dict,
         return None
     h1_rsi = h1_rsi_values[-1]
 
-    # --- Breakout checks ---
+    # H1 breakout check
     h1_breakout = check_breakout_h1(pair, candles_1h, rank_map)
     yest_breakout = check_breakout_yesterday(pair, candles_1h, rank_map)
     if h1_breakout:
@@ -56,51 +56,40 @@ def build_trade_signal(pair: str, base_val: int, quote_val: int, rank_map: dict,
             logger.info(f"Skipped {pair}: No breakout confirmation")
         return None
 
-    # --- Direction & strength ---
+    # Direction and strength
     direction = "BUY" if base_val > quote_val else "SELL"
     strong_val, weak_val = (base_val, quote_val) if direction == "BUY" else (quote_val, base_val)
 
-    # --- Indicators ---
+    # ---------------- All Conditions ----------------
     atr_val = atr(candles_1h)
     ema_20 = calculate_ema(closes, period=20)
     ema_200 = calculate_ema(closes, period=200)
     ema_spacing = abs(ema_20 - ema_200)
-    ema_spacing_ok = (ema_spacing / atr_val) <= MAX_EMA_SPACING
+
+    # ATR-based EMA spacing threshold (e.g., max 3 ATRs apart)
+    MAX_EMA_SPACING_ATR = 3.0
+    ema_spacing_condition = ema_spacing <= MAX_EMA_SPACING_ATR * atr_val
+
     price_near_ema20 = abs(closes[-1] - ema_20) <= ATR_TOUCH_THRESHOLD * atr_val
 
-    # --- Flexible Strength Diff rules ---
-    strength_diff = abs(strong_val - weak_val)
-    strength_ok = False
-    strength_rule_used = None
-
-    # BUY logic
-    if direction == "BUY":
-        if strength_diff in [12, 14] and strong_val > 0 and weak_val < 0:
-            strength_ok = True
-            strength_rule_used = f"{strong_val:+d}/{weak_val:+d}"
-    # SELL logic
-    else:
-        if strength_diff in [12, 14] and strong_val < 0 and weak_val > 0:
-            strength_ok = True
-            strength_rule_used = f"{strong_val:+d}/{weak_val:+d}"
-
-    # --- Conditions ---
     conditions = {
-        "strength_extreme": strength_ok,
+        "strength_diff": strength_filter(strong_val, weak_val),
         "rsi": (h1_rsi >= 50 if direction == "BUY" else h1_rsi <= 50),
-        "ema_spacing": ema_spacing_ok,
+        "ema_spacing": ema_spacing_condition,  # updated
         "price_touch_ema20": price_near_ema20
     }
 
+    # Debug logging
     if debug:
         logger.info(f"Checking {pair}: {conditions}")
 
+    # Check all conditions
     if not all(conditions.values()):
         if debug:
             logger.info(f"Skipped {pair}: Conditions not met")
         return None
 
-    # --- Entry / SL / TP ---
+    # ---------------- Entry / SL / TP ----------------
     entry = closes[-1]
     stop_loss = entry - atr_val if direction == "BUY" else entry + atr_val
     tp1, tp2, tp3 = (
@@ -109,15 +98,19 @@ def build_trade_signal(pair: str, base_val: int, quote_val: int, rank_map: dict,
         entry - atr_val * 2, entry - atr_val * 4, entry - atr_val * 6
     )
 
-    # --- Alert message ---
+    # ---------------- Send Alert ----------------
     symbol = "🟢 BUY" if direction == "BUY" else "🔴 SELL"
-    strengths_text = f"{strong_val:+d}, {weak_val:+d}" if direction == "BUY" else f"{weak_val:+d}, {strong_val:+d}"
+
+    # Order strengths correctly depending on direction
+    if direction == "BUY":
+        strengths_text = f"{strong_val:+d}, {weak_val:+d}"
+    else:  # SELL
+        strengths_text = f"{weak_val:+d}, {strong_val:+d}"
 
     alert_msg = (
         f"{symbol} {pair}\n"
-        f"Strength Diff: {strength_diff} ({strength_rule_used}) | Strengths: {strengths_text}\n"
-        f"H1 RSI: {h1_rsi:.1f} | EMA Spacing (20 vs 200): {ema_spacing:.5f} "
-        f"({ema_spacing/atr_val:.2f} ATR)\n"
+        f"Strength Diff: {abs(strong_val - weak_val)} | Strengths: {strengths_text}\n"
+        f"H1 RSI: {h1_rsi:.1f} | EMA Spacing (20 vs 200): {ema_spacing:.5f}\n"
         f"Breakout: {breakout_text}\n"
         f"Entry: {entry:.5f} | SL: {stop_loss:.5f} | ATR: {atr_val:.5f}\n"
         f"TPs: TP1:{tp1:.5f}, TP2:{tp2:.5f}, TP3:{tp3:.5f} | Min RRR:1:{MIN_RRR}"
@@ -125,18 +118,16 @@ def build_trade_signal(pair: str, base_val: int, quote_val: int, rank_map: dict,
     send_alert(alert_msg)
     _LAST_ALERT_TIME[pair] = now
 
-    # --- Store trade info ---
+    # Store trade info
     trade_info = {
         "pair": pair,
         "direction": direction,
         "entry": entry,
         "stop_loss": stop_loss,
         "take_profit_levels": [tp1, tp2, tp3],
-        "strength_diff": strength_diff,
-        "strength_rule_used": strength_rule_used,
+        "strength_diff": abs(strong_val - weak_val),
         "h1_rsi": h1_rsi,
         "ema_spacing": ema_spacing,
-        "ema_spacing_atr": ema_spacing / atr_val,
         "breakout_text": breakout_text,
         "time": now
     }
