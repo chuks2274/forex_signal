@@ -4,7 +4,7 @@ import time
 from typing import Dict, List, Optional
 from currency_strength import run_currency_strength_alert, strength_filter
 from config import PAIRS, LOOP_INTERVAL, ALERT_COOLDOWN
-from breakout import check_breakout_h1, check_breakout_yesterday
+from breakout import detect_h4_support_resistance, check_h4_breakout
 from utils import get_recent_candles, atr, send_alert, load_active_trades, save_active_trades, rsi, calculate_ema
 
 # ---------------- Logger ----------------
@@ -16,8 +16,7 @@ logging.basicConfig(level=logging.INFO)
 _ACTIVE_TRADES: List[Dict] = load_active_trades()
 _LAST_ALERT_TIME: Dict[str, float] = {}
 MIN_RRR = 2.0
-MAX_EMA_SPACING = 1.0  # adjust per pair volatility
-ATR_TOUCH_THRESHOLD = 0.5  # price proximity to EMA20
+ATR_TOUCH_THRESHOLD = 0.5  # Price proximity to ATR for entry confirmation
 
 # ---------------- Build Trade Signal ----------------
 def build_trade_signal(pair: str, base_val: int, quote_val: int, rank_map: dict, debug: bool = False) -> Optional[Dict]:
@@ -29,116 +28,104 @@ def build_trade_signal(pair: str, base_val: int, quote_val: int, rank_map: dict,
             logger.info(f"Skipped {pair}: Alert cooldown active")
         return None
 
-    # H1 candles & RSI
-    candles_1h = get_recent_candles(pair, "H1", 250)
-    if not candles_1h:
+    # H4 candles
+    candles_h4 = get_recent_candles(pair, "H4", 50)
+    if not candles_h4:
         if debug:
-            logger.info(f"Skipped {pair}: Missing H1 candles")
+            logger.info(f"Skipped {pair}: Missing H4 candles")
         return None
 
-    closes = [float(c["close"]) for c in candles_1h]
-    h1_rsi_values = rsi(closes)
-    if not h1_rsi_values:
+    closes_h4 = [float(c["close"]) for c in candles_h4]
+    h4_rsi_values = rsi(closes_h4)
+    h4_rsi = h4_rsi_values[-1] if h4_rsi_values else None
+
+    # Detect H4 support/resistance
+    support, resistance = detect_h4_support_resistance(pair, candles_h4)
+    current_price = closes_h4[-1]
+
+    # Check breakout signal
+    breakout_info = check_h4_breakout(pair, candles_h4)
+    if not breakout_info:
         if debug:
-            logger.info(f"Skipped {pair}: Cannot calculate H1 RSI")
+            logger.info(f"Skipped {pair}: No H4 breakout")
         return None
-    h1_rsi = h1_rsi_values[-1]
+    level, signal = breakout_info  # signal = "BUY" or "SELL"
 
-    # H1 breakout check
-    h1_breakout = check_breakout_h1(pair, candles_1h, rank_map)
-    yest_breakout = check_breakout_yesterday(pair, candles_1h, rank_map)
-    if h1_breakout:
-        breakout_text = "Today Breakout ✅"
-    elif yest_breakout:
-        breakout_text = "Yesterday Breakout ✅"
-    else:
+    # Daily trend confirmation
+    daily_candles = get_recent_candles(pair, "D", 50)
+    if not daily_candles:
         if debug:
-            logger.info(f"Skipped {pair}: No breakout confirmation")
+            logger.info(f"Skipped {pair}: Missing daily candles")
+        return None
+    daily_closes = [c["close"] for c in daily_candles]
+    ema_200_daily = calculate_ema(daily_closes, 200)
+    ema_200_slope = ema_200_daily - calculate_ema(daily_closes[:-1], 200)
+
+    # Trend filter
+    if signal == "BUY" and current_price < ema_200_daily:
+        if debug:
+            logger.info(f"Skipped {pair}: Daily trend not bullish")
+        return None
+    if signal == "SELL" and current_price > ema_200_daily:
+        if debug:
+            logger.info(f"Skipped {pair}: Daily trend not bearish")
         return None
 
-    # Direction and strength
-    direction = "BUY" if base_val > quote_val else "SELL"
-    strong_val, weak_val = (base_val, quote_val) if direction == "BUY" else (quote_val, base_val)
+    # Currency strength confirmation
+    base, quote = pair.split("_")
+    base_strength = rank_map.get(base, 0)
+    quote_strength = rank_map.get(quote, 0)
 
-    # ---------------- All Conditions ----------------
-    atr_val = atr(candles_1h)
-    ema_20 = calculate_ema(closes, period=20)
-    ema_200 = calculate_ema(closes, period=200)
-    ema_spacing = abs(ema_20 - ema_200)
-
-    # ATR-based EMA spacing threshold (e.g., max 3 ATRs apart)
-    MAX_EMA_SPACING_ATR = 3.0
-    ema_spacing_condition = ema_spacing <= MAX_EMA_SPACING_ATR * atr_val
-
-    price_near_ema20 = abs(closes[-1] - ema_20) <= ATR_TOUCH_THRESHOLD * atr_val
-
-    conditions = {
-        "strength_diff": strength_filter(strong_val, weak_val),
-        "rsi": (h1_rsi >= 50 if direction == "BUY" else h1_rsi <= 50),
-        "ema_spacing": ema_spacing_condition,  # updated
-        "price_touch_ema20": price_near_ema20
-    }
-
-    # Debug logging
-    if debug:
-        logger.info(f"Checking {pair}: {conditions}")
-
-    # Check all conditions
-    if not all(conditions.values()):
+    if signal == "BUY" and not (base_strength > quote_strength):
         if debug:
-            logger.info(f"Skipped {pair}: Conditions not met")
+            logger.info(f"Skipped {pair}: Currency strength not aligned for BUY")
+        return None
+    if signal == "SELL" and not (base_strength < quote_strength):
+        if debug:
+            logger.info(f"Skipped {pair}: Currency strength not aligned for SELL")
         return None
 
     # ---------------- Entry / SL / TP ----------------
-    entry = closes[-1]
-    stop_loss = entry - atr_val if direction == "BUY" else entry + atr_val
+    atr_val = atr(candles_h4)
+    entry = current_price
+    stop_loss = entry - atr_val if signal == "BUY" else entry + atr_val
     tp1, tp2, tp3 = (
         entry + atr_val * 2, entry + atr_val * 4, entry + atr_val * 6
-    ) if direction == "BUY" else (
+    ) if signal == "BUY" else (
         entry - atr_val * 2, entry - atr_val * 4, entry - atr_val * 6
     )
 
-    # ---------------- Send Alert ----------------
-    symbol = "🟢 BUY" if direction == "BUY" else "🔴 SELL"
-
-    # Order strengths correctly depending on direction
-    if direction == "BUY":
-        strengths_text = f"{strong_val:+d}, {weak_val:+d}"
-    else:  # SELL
-        strengths_text = f"{weak_val:+d}, {strong_val:+d}"
-
+    # Send Alert
+    symbol = "🟢 BUY" if signal == "BUY" else "🔴 SELL"
+    strengths_text = f"{base_strength:+d}, {quote_strength:+d}" if signal == "BUY" else f"{quote_strength:+d}, {base_strength:+d}"
     alert_msg = (
         f"{symbol} {pair}\n"
-        f"Strength Diff: {abs(strong_val - weak_val)} | Strengths: {strengths_text}\n"
-        f"H1 RSI: {h1_rsi:.1f} | EMA Spacing (20 vs 200): {ema_spacing:.5f}\n"
-        f"Breakout: {breakout_text}\n"
+        f"Strength Diff: {abs(base_strength - quote_strength)} | Strengths: {strengths_text}\n"
+        f"H4 RSI: {h4_rsi:.1f} | Breakout Signal: {signal}\n"
         f"Entry: {entry:.5f} | SL: {stop_loss:.5f} | ATR: {atr_val:.5f}\n"
         f"TPs: TP1:{tp1:.5f}, TP2:{tp2:.5f}, TP3:{tp3:.5f} | Min RRR:1:{MIN_RRR}"
     )
     send_alert(alert_msg)
     _LAST_ALERT_TIME[pair] = now
 
-    # Store trade info
     trade_info = {
         "pair": pair,
-        "direction": direction,
+        "direction": signal,
         "entry": entry,
         "stop_loss": stop_loss,
         "take_profit_levels": [tp1, tp2, tp3],
-        "strength_diff": abs(strong_val - weak_val),
-        "h1_rsi": h1_rsi,
-        "ema_spacing": ema_spacing,
-        "breakout_text": breakout_text,
+        "strength_diff": abs(base_strength - quote_strength),
+        "h4_rsi": h4_rsi,
+        "breakout_signal": signal,
         "time": now
     }
     _ACTIVE_TRADES.append(trade_info)
     logger.info(alert_msg.replace("\n", " | "))
-
     return trade_info
 
 # ---------------- Async Trade Loop ----------------
 async def run_trade_signal_loop_async(debug: bool = False):
-    logger.info("📡 Async Trade Signal Loop Started")
+    logger.info("📡 Async H4 Trade Signal Loop Started")
     last_trade_alert_times: Dict = {}
 
     while True:

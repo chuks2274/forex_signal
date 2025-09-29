@@ -3,7 +3,7 @@ import time
 from threading import Lock
 from config import PAIRS, STRENGTH_ALERT_COOLDOWN
 from utils import get_recent_candles, rsi, ema_slope, atr, send_telegram
-from breakout import check_breakout_h1
+from breakout import check_h4_breakout  # H4 breakout
 
 logger = logging.getLogger("currency_strength")
 logger.setLevel(logging.INFO)
@@ -26,6 +26,7 @@ def calculate_strength():
         if base not in CURRENCIES or quote not in CURRENCIES:
             continue
 
+        # H4 candles for currency strength
         candles = get_recent_candles(pair, "H4", 20)
         if not candles:
             continue
@@ -50,13 +51,11 @@ def calculate_strength():
     max_rank, min_rank = 7, -7
     rank_map = {}
     for idx, (cur, _) in enumerate(sorted_scores):
-        # Round to nearest integer and force no zero
         rank = int(round(max_rank - (idx * (max_rank - min_rank) / (n - 1))))
         if rank == 0:
             rank = 1 if idx < n / 2 else -1
         rank_map[cur] = rank
 
-    # Ensure all values are integers
     for cur in rank_map:
         rank_map[cur] = int(rank_map[cur])
 
@@ -88,7 +87,6 @@ def run_currency_strength_alert(last_trade_alert_times: dict = None):
     now_ts = time.time()
 
     with _strength_alert_lock:
-        # Cooldown check
         if now_ts - _last_strength_alert_time < STRENGTH_ALERT_COOLDOWN:
             rank_map = calculate_strength()
             return rank_map, _last_strength_alert_time
@@ -123,17 +121,16 @@ def run_currency_strength_alert(last_trade_alert_times: dict = None):
                     if not strength_filter(strong_val, weak_val):
                         continue
 
-                    # H1 breakout confirmation
-                    candles_h1 = get_recent_candles(pair, "H1", 50)
-                    if not candles_h1:
+                    # H4 breakout confirmation
+                    candles_h4 = get_recent_candles(pair, "H4", 50)
+                    if not candles_h4:
                         continue
-                    breakout_info = check_breakout_h1(pair, candles_h1, rank_map)
+                    breakout_info = check_h4_breakout(pair, candles_h4)
                     if not breakout_info:
                         continue
 
                     candidate_pairs.append((abs(strong_val - weak_val), pair, base_val, quote_val))
 
-                # Trigger only the top candidate
                 candidate_pairs.sort(reverse=True, key=lambda x: x[0])
                 if candidate_pairs:
                     _, pair, base_val, quote_val = candidate_pairs[0]

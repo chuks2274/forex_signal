@@ -29,7 +29,8 @@ def send_telegram(message: str) -> bool:
 send_alert = send_telegram
 
 # ================= OANDA CANDLES =================
-def fetch_oanda_candles(pair: str, granularity: str = "H1", count: int = 30, max_retries: int = 3, backoff: float = 1.5) -> list:
+def fetch_oanda_candles(pair: str, granularity: str = "H4", count: int = 30, max_retries: int = 3, backoff: float = 1.5) -> list:
+    """Fetch OANDA candles with automatic retry and H4 default granularity."""
     url = f"{OANDA_API}/instruments/{pair}/candles"
     params = {"granularity": granularity, "count": count, "price": "M"}
     for attempt in range(1, max_retries + 1):
@@ -47,7 +48,8 @@ def fetch_oanda_candles(pair: str, granularity: str = "H1", count: int = 30, max
     logger.error(f"Failed to fetch OANDA candles for {pair} at {granularity} after {max_retries} attempts.")
     return []
 
-def get_recent_candles(pair: str, timeframe: str = "H1", count: int = 30) -> list[dict]:
+def get_recent_candles(pair: str, timeframe: str = "H4", count: int = 30) -> list[dict]:
+    """Return normalized candle data for the given pair and timeframe (default H4)."""
     raw_candles = fetch_oanda_candles(pair, timeframe, count)
     normalized = []
     for c in raw_candles:
@@ -128,6 +130,7 @@ def ema_slope(closes: list, period: int = 10) -> float:
 
 # ================= CURRENT PRICE =================
 def get_current_price(pair: str) -> float:
+    """Fetch the latest price from H1 or M1 candles (keep small for real-time check)."""
     candles = get_recent_candles(pair, "M1", count=1)
     if candles:
         return candles[-1]["close"]
@@ -176,31 +179,22 @@ def save_active_trades(trades):
             json.dump(trades, f)
     except Exception as e:
         logger.error(f"Failed to save active trades: {e}")
-        
+
 # ================= EMA SPACING / CALCULATION =================
 def calculate_ema(prices: list, period: int = 20) -> float:
-    """
-    Calculate the Exponential Moving Average (EMA) for a list of prices.
-    Returns the last EMA value.
-    """
     if len(prices) < period:
         return None
-    ema = sum(prices[:period]) / period  # start with SMA
+    ema = sum(prices[:period]) / period
     multiplier = 2 / (period + 1)
     for price in prices[period:]:
         ema = (price - ema) * multiplier + ema
     return ema
 
-
 def get_ema_spacing(pair: str, fast: int = 20, slow: int = 200) -> float:
-    """
-    Returns the absolute difference between fast EMA and slow EMA for a given pair.
-    """
-    candles = get_recent_candles(pair, "H1", max(fast, slow) + 10)
+    candles = get_recent_candles(pair, "H4", max(fast, slow) + 10)
     closes = [float(c["close"]) for c in candles]
     ema_fast = calculate_ema(closes, fast)
     ema_slow = calculate_ema(closes, slow)
     if ema_fast is None or ema_slow is None:
         return 0.0
     return abs(ema_fast - ema_slow)
-

@@ -8,7 +8,7 @@ from utils import send_telegram
 from trade_signal import run_trade_signal_loop_async
 from currency_strength import run_currency_strength_alert
 from forex_news_alert import run_news_alert_loop, alerted_events
-from breakout import run_group_breakout_alert
+from breakout import run_group_h4_breakout_alert  # Updated import
 
 # ---------------- Logger ----------------
 logger = logging.getLogger("forex_bot")
@@ -21,7 +21,7 @@ DEBUG_MODE = False
 # ---------------- Cooldown Trackers ----------------
 last_trade_alert_times = {}
 last_heartbeat_time = 0
-GROUP_BREAKOUT_COOLDOWN = 3600
+GROUP_BREAKOUT_COOLDOWN = 4 * 3600  # 4-hour cooldown for H4 breakout alerts
 HEARTBEAT_COOLDOWN = 24 * 3600
 STATE_FILE = "bot_state.json"
 
@@ -81,7 +81,7 @@ async def group_breakout_loop():
     while not shutdown_event.is_set():
         try:
             await asyncio.to_thread(
-                run_group_breakout_alert,
+                run_group_h4_breakout_alert,  # Updated function
                 min_pairs=5,
                 send_alert_fn=send_telegram,
                 group_cooldown=GROUP_BREAKOUT_COOLDOWN
