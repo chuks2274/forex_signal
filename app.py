@@ -8,7 +8,7 @@ from utils import send_telegram
 from trade_signal import run_trade_signal_loop_async
 from currency_strength import run_currency_strength_alert
 from forex_news_alert import run_news_alert_loop, alerted_events
-from breakout import run_group_h4_breakout_alert  # Updated import
+from breakout import run_group_breakout_alert  # H1 breakout function
 
 # ---------------- Logger ----------------
 logger = logging.getLogger("forex_bot")
@@ -21,7 +21,7 @@ DEBUG_MODE = False
 # ---------------- Cooldown Trackers ----------------
 last_trade_alert_times = {}
 last_heartbeat_time = 0
-GROUP_BREAKOUT_COOLDOWN = 4 * 3600  # 4-hour cooldown for H4 breakout alerts
+GROUP_BREAKOUT_COOLDOWN = 1 * 3600  # 1-hour cooldown for H1 breakout alerts
 HEARTBEAT_COOLDOWN = 24 * 3600
 STATE_FILE = "bot_state.json"
 
@@ -70,18 +70,17 @@ async def send_heartbeat_loop():
 async def currency_strength_loop():
     while not shutdown_event.is_set():
         try:
-            # Thread-safe call to synchronous strength alert
             await asyncio.to_thread(run_currency_strength_alert, last_trade_alert_times)
         except Exception as e:
             logger.error(f"Unexpected error in currency strength loop: {e}", exc_info=True)
         await asyncio.sleep(STRENGTH_ALERT_COOLDOWN)
 
-# ---------------- Group Breakout Loop ----------------
+# ---------------- Group Breakout Loop (H1) ----------------
 async def group_breakout_loop():
     while not shutdown_event.is_set():
         try:
             await asyncio.to_thread(
-                run_group_h4_breakout_alert,  # Updated function
+                run_group_breakout_alert,  # H1 breakout
                 min_pairs=5,
                 send_alert_fn=send_telegram,
                 group_cooldown=GROUP_BREAKOUT_COOLDOWN
@@ -98,7 +97,6 @@ async def trade_signal_loop():
 async def main():
     logger.info("🚀 Forex bot started")
 
-    # Start all loops concurrently
     tasks = [
         asyncio.create_task(trade_signal_loop()),
         asyncio.create_task(run_news_alert_loop(shutdown_event)),

@@ -30,7 +30,7 @@ send_alert = send_telegram
 
 # ================= OANDA CANDLES =================
 def fetch_oanda_candles(pair: str, granularity: str = "H4", count: int = 30, max_retries: int = 3, backoff: float = 1.5) -> list:
-    """Fetch OANDA candles with automatic retry and H4 default granularity."""
+    """Fetch OANDA candles with automatic retry."""
     url = f"{OANDA_API}/instruments/{pair}/candles"
     params = {"granularity": granularity, "count": count, "price": "M"}
     for attempt in range(1, max_retries + 1):
@@ -49,7 +49,7 @@ def fetch_oanda_candles(pair: str, granularity: str = "H4", count: int = 30, max
     return []
 
 def get_recent_candles(pair: str, timeframe: str = "H4", count: int = 30) -> list[dict]:
-    """Return normalized candle data for the given pair and timeframe (default H4)."""
+    """Return normalized candle data for the given pair and timeframe."""
     raw_candles = fetch_oanda_candles(pair, timeframe, count)
     normalized = []
     for c in raw_candles:
@@ -61,13 +61,6 @@ def get_recent_candles(pair: str, timeframe: str = "H4", count: int = 30) -> lis
                 "high": float(mid.get("h", mid.get("high", 0))),
                 "low": float(mid.get("l", mid.get("low", 0))),
                 "close": float(mid.get("c", mid.get("close", 0)))
-            })
-        elif isinstance(c, (tuple, list)) and len(c) >= 4:
-            normalized.append({
-                "open": float(c[0]),
-                "high": float(c[1]),
-                "low": float(c[2]),
-                "close": float(c[3])
             })
     return normalized
 
@@ -117,9 +110,6 @@ def rsi(closes: list, period: int = 14) -> list:
         rsis.append(100 - (100 / (1 + rs)))
     return rsis
 
-def get_rsi(closes: list, period: int = 14) -> list:
-    return rsi(closes, period)
-
 def ema_slope(closes: list, period: int = 10) -> float:
     if len(closes) < period + 2:
         return 0
@@ -130,35 +120,10 @@ def ema_slope(closes: list, period: int = 10) -> float:
 
 # ================= CURRENT PRICE =================
 def get_current_price(pair: str) -> float:
-    """Fetch the latest price from H1 or M1 candles (keep small for real-time check)."""
     candles = get_recent_candles(pair, "M1", count=1)
     if candles:
         return candles[-1]["close"]
     return 0.0
-
-# ================= CURRENCY STRENGTH =================
-def get_currency_strength(pairs: list) -> dict:
-    strengths = {}
-    for p in pairs:
-        base, quote = p.split("_")
-        price = get_current_price(p)
-        strengths[base] = strengths.get(base, 0) + price
-        strengths[quote] = strengths.get(quote, 0) - price
-    return strengths
-
-# ================= SESSION =================
-def get_current_session(now_utc=None) -> str:
-    if now_utc is None:
-        now_utc = datetime.utcnow()
-    ny_tz = pytz.timezone("America/New_York")
-    now_ny = now_utc.replace(tzinfo=pytz.utc).astimezone(ny_tz)
-    hour = now_ny.hour
-    if 0 <= hour < 8:
-        return "Asian"
-    elif 8 <= hour < 16:
-        return "London"
-    else:
-        return "NewYork"
 
 # ================= ACTIVE TRADES JSON =================
 ACTIVE_TRADES_FILE = "active_trades.json"
@@ -180,7 +145,7 @@ def save_active_trades(trades):
     except Exception as e:
         logger.error(f"Failed to save active trades: {e}")
 
-# ================= EMA SPACING / CALCULATION =================
+# ================= EMA CALCULATION =================
 def calculate_ema(prices: list, period: int = 20) -> float:
     if len(prices) < period:
         return None
@@ -189,12 +154,3 @@ def calculate_ema(prices: list, period: int = 20) -> float:
     for price in prices[period:]:
         ema = (price - ema) * multiplier + ema
     return ema
-
-def get_ema_spacing(pair: str, fast: int = 20, slow: int = 200) -> float:
-    candles = get_recent_candles(pair, "H4", max(fast, slow) + 10)
-    closes = [float(c["close"]) for c in candles]
-    ema_fast = calculate_ema(closes, fast)
-    ema_slow = calculate_ema(closes, slow)
-    if ema_fast is None or ema_slow is None:
-        return 0.0
-    return abs(ema_fast - ema_slow)
