@@ -1,6 +1,6 @@
 import logging
 import time
-from utils import get_recent_candles
+from utils import get_recent_candles, calculate_ema
 from config import PAIRS
 
 logger = logging.getLogger("breakout")
@@ -22,72 +22,59 @@ CURRENCY_GROUPS = {cur: [p for p in pairs if p in PAIRS] for cur, pairs in RAW_C
 
 # Per-group cooldown tracking
 _last_group_alerts = {}  # key = group, value = last alert timestamp
+GROUP_COOLDOWN = 4 * 3600  # 4 hours cooldown
 
-# ----------------- Individual H1 breakout check -----------------
-def check_breakout_h1(pair, candles_h1=None, rank_map=None):
+# ----------------- Individual H4 breakout check -----------------
+def check_breakout_h4(pair):
     """
-    Check if the latest H1 candle broke yesterday's high or low.
-    Returns (breakout_level, direction, extra) if breakout occurs, otherwise None.
-    """
-    try:
-        if candles_h1 is None:
-            candles_h1 = get_recent_candles(pair, "H1", 1)
-        if not candles_h1 or "close" not in candles_h1[-1]:
-            return None
-
-        daily = get_recent_candles(pair, "D", 2)
-        if not daily or len(daily) < 2 or "high" not in daily[-2] or "low" not in daily[-2]:
-            return None
-
-        prev_high, prev_low = daily[-2]["high"], daily[-2]["low"]
-        current_close = candles_h1[-1]["close"]
-
-        if current_close > prev_high:
-            return (prev_high, "buy", None)
-        elif current_close < prev_low:
-            return (prev_low, "sell", None)
-        return None
-    except Exception as e:
-        logger.error(f"{pair} H1 breakout check error: {e}")
-        return None
-
-# ----------------- Yesterday breakout check -----------------
-def check_breakout_yesterday(pair, candles_h1=None, rank_map=None):
-    """
-    Check if any H1 candle today broke yesterday's high or low.
-    Returns (breakout_level, direction, extra) if breakout occurs, otherwise None.
+    Check if the latest H4 candle breaks recent support/resistance.
+    Returns True if breakout occurs, False otherwise.
     """
     try:
-        if candles_h1 is None:
-            candles_h1 = get_recent_candles(pair, "H1", 50)  # last 50 H1 candles
-        if not candles_h1:
-            return None
+        candles_4h = get_recent_candles(pair, "H4", 50)
+        if not candles_4h or len(candles_4h) < 2:
+            return False
 
-        daily = get_recent_candles(pair, "D", 2)
-        if not daily or len(daily) < 2 or "high" not in daily[-2] or "low" not in daily[-2]:
-            return None
+        closes = [float(c["close"]) for c in candles_4h]
+        highs = [float(c["high"]) for c in candles_4h]
+        lows = [float(c["low"]) for c in candles_4h]
 
-        prev_high, prev_low = daily[-2]["high"], daily[-2]["low"]
+        last_close = closes[-1]
 
-        for candle in candles_h1:
-            close = candle.get("close")
-            if close is None:
-                continue
-            if close > prev_high:
-                return (prev_high, "buy", None)
-            elif close < prev_low:
-                return (prev_low, "sell", None)
+        # Recent H4 high/low
+        recent_high = max(highs[-50:])
+        recent_low = min(lows[-50:])
 
-        return None
+        # ---------------- Safe D1 EMA Trend ----------------
+        candles_d1 = get_recent_candles(pair, "D1", 250)
+        if not candles_d1 or len(candles_d1) < 200:
+            d1_trend_up = d1_trend_down = True  # Assume neutral if not enough D1 data
+        else:
+            closes_d1 = [float(c["close"]) for c in candles_d1]
+            ema_200_d1 = calculate_ema(closes_d1, period=200)
+            if ema_200_d1 is None:
+                d1_trend_up = d1_trend_down = True
+            else:
+                d1_trend_up = closes_d1[-1] > ema_200_d1
+                d1_trend_down = closes_d1[-1] < ema_200_d1
+
+        # Only trigger if breakout aligns with D1 trend
+        if last_close > recent_high and d1_trend_up:
+            return True
+        elif last_close < recent_low and d1_trend_down:
+            return True
+
+        return False
+
     except Exception as e:
-        logger.error(f"{pair} yesterday breakout check error: {e}")
-        return None
+        logger.error(f"{pair} H4 breakout check error: {e}")
+        return False
 
 # ----------------- Group breakout alert -----------------
-def run_group_breakout_alert(min_pairs=4, send_alert_fn=None, group_cooldown=3600):
+def run_group_breakout_alert(min_pairs=4, send_alert_fn=None):
     """
-    Check for breakout alerts per currency group.
-    Each group has its own cooldown (group_cooldown, in seconds).
+    Check for H4 breakout alerts per currency group.
+    Each group has a 4-hour cooldown.
     Returns a dict of groups with breakout pairs.
     """
     global _last_group_alerts
@@ -99,8 +86,7 @@ def run_group_breakout_alert(min_pairs=4, send_alert_fn=None, group_cooldown=360
 
         for pair in pairs:
             try:
-                breakout_info = check_breakout_h1(pair)
-                if breakout_info and breakout_info[0] is not None:
+                if check_breakout_h4(pair):
                     breakout_pairs.append(pair)
             except Exception as e:
                 logger.error(f"{pair} group breakout check error: {e}")
@@ -108,12 +94,12 @@ def run_group_breakout_alert(min_pairs=4, send_alert_fn=None, group_cooldown=360
         # Only send alert if enough pairs broke out and cooldown passed
         if len(breakout_pairs) >= min_pairs:
             last_ts = _last_group_alerts.get(group, 0)
-            if now - last_ts >= group_cooldown:
+            if now - last_ts >= GROUP_COOLDOWN:
                 alerts[group] = breakout_pairs
                 _last_group_alerts[group] = now
                 if send_alert_fn:
                     msg = (
-                        f"📢 {group} Group Breakout Alert! ({len(breakout_pairs)} pairs)\n"
+                        f"📢 {group} Group H4 Breakout Alert! ({len(breakout_pairs)} pairs)\n"
                         + "\n".join(sorted(breakout_pairs))
                     )
                     send_alert_fn(msg)

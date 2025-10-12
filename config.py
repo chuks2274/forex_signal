@@ -63,5 +63,5 @@ PAIRS = os.getenv("PAIRS", ",".join(DEFAULT_PAIRS)).split(",")
 PAIRS = [p.strip() for p in PAIRS]
 
 # --- Alert cooldowns in seconds ---
-ALERT_COOLDOWN = 1 * 3600           # general breakout alerts (1 hour)
+ALERT_COOLDOWN = 4 * 3600           # general breakout alerts (1 hour)
 STRENGTH_ALERT_COOLDOWN = 4 * 3600  # currency strength alerts every 4 hours

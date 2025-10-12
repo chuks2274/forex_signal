@@ -8,7 +8,7 @@ from utils import send_telegram
 from trade_signal import run_trade_signal_loop_async
 from currency_strength import run_currency_strength_alert
 from forex_news_alert import run_news_alert_loop, alerted_events
-from breakout import run_group_breakout_alert  # H1 breakout function
+from breakout import run_group_breakout_alert  # now H4-aligned
 
 # ---------------- Logger ----------------
 logger = logging.getLogger("forex_bot")
@@ -21,7 +21,6 @@ DEBUG_MODE = False
 # ---------------- Cooldown Trackers ----------------
 last_trade_alert_times = {}
 last_heartbeat_time = 0
-GROUP_BREAKOUT_COOLDOWN = 1 * 3600  # 1-hour cooldown for H1 breakout alerts
 HEARTBEAT_COOLDOWN = 24 * 3600
 STATE_FILE = "bot_state.json"
 
@@ -75,18 +74,13 @@ async def currency_strength_loop():
             logger.error(f"Unexpected error in currency strength loop: {e}", exc_info=True)
         await asyncio.sleep(STRENGTH_ALERT_COOLDOWN)
 
-# ---------------- Group Breakout Loop (H1) ----------------
-async def group_breakout_loop():
+# ---------------- Group Breakout Loop (H4) ----------------
+async def group_breakout_loop_h4():
     while not shutdown_event.is_set():
         try:
-            await asyncio.to_thread(
-                run_group_breakout_alert,  # H1 breakout
-                min_pairs=5,
-                send_alert_fn=send_telegram,
-                group_cooldown=GROUP_BREAKOUT_COOLDOWN
-            )
+            await asyncio.to_thread(run_group_breakout_alert)
         except Exception as e:
-            logger.error(f"Unexpected error in group breakout loop: {e}", exc_info=True)
+            logger.error(f"Unexpected error in H4 group breakout loop: {e}", exc_info=True)
         await asyncio.sleep(60)
 
 # ---------------- Trade Signal Loop ----------------
@@ -101,7 +95,7 @@ async def main():
         asyncio.create_task(trade_signal_loop()),
         asyncio.create_task(run_news_alert_loop(shutdown_event)),
         asyncio.create_task(currency_strength_loop()),
-        asyncio.create_task(group_breakout_loop()),
+        asyncio.create_task(group_breakout_loop_h4()),
         asyncio.create_task(send_heartbeat_loop())
     ]
 

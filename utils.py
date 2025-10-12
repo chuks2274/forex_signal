@@ -13,6 +13,9 @@ from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, OANDA_API, HEADERS
 logger = logging.getLogger("utils")
 logging.basicConfig(level=logging.INFO)
 
+# Track closed D1 markets to avoid repeated 400 errors
+_D1_MARKET_CLOSED: dict[str, bool] = {}
+
 # ================= TELEGRAM =================
 def send_telegram(message: str) -> bool:
     """Send a message via Telegram bot."""
@@ -30,21 +33,43 @@ send_alert = send_telegram
 
 # ================= OANDA CANDLES =================
 def fetch_oanda_candles(pair: str, granularity: str = "H4", count: int = 30, max_retries: int = 3, backoff: float = 1.5) -> list:
-    """Fetch OANDA candles with automatic retry."""
+    """
+    Fetch OANDA candles with automatic retry.
+    Automatically skips D1 if market closed to avoid repeated 400 errors.
+    """
+    # Skip D1 if previously marked as closed
+    if granularity == "D1" and _D1_MARKET_CLOSED.get(pair, False):
+        return []
+
     url = f"{OANDA_API}/instruments/{pair}/candles"
     params = {"granularity": granularity, "count": count, "price": "M"}
+
     for attempt in range(1, max_retries + 1):
         try:
             r = requests.get(url, headers=HEADERS, params=params, timeout=10)
             r.raise_for_status()
-            return r.json().get("candles", [])
-        except RequestException as e:
+            candles = r.json().get("candles", [])
+
+            # Mark D1 as closed if empty response
+            if granularity == "D1" and not candles:
+                _D1_MARKET_CLOSED[pair] = True
+                logger.warning(f"{pair} D1 market appears closed. Skipping D1 fetch.")
+
+            return candles
+
+        except requests.HTTPError as e:
+            if granularity == "D1" and e.response.status_code == 400:
+                _D1_MARKET_CLOSED[pair] = True
+                logger.warning(f"{pair} D1 market appears closed (HTTP 400). Skipping D1 fetch.")
+                return []
             wait_time = backoff ** attempt
             logger.warning(f"[Attempt {attempt}/{max_retries}] Failed to fetch {pair} candles ({granularity}): {e}. Retrying in {wait_time:.1f}s...")
             time.sleep(wait_time)
+
         except Exception as e:
             logger.error(f"Unexpected error fetching {pair} candles ({granularity}): {e}")
             break
+
     logger.error(f"Failed to fetch OANDA candles for {pair} at {granularity} after {max_retries} attempts.")
     return []
 

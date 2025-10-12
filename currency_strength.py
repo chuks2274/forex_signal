@@ -3,7 +3,7 @@ import time
 from threading import Lock
 from config import PAIRS, STRENGTH_ALERT_COOLDOWN
 from utils import get_recent_candles, rsi, ema_slope, atr, send_telegram
-from breakout import check_breakout_h1
+from breakout import check_breakout_h4  # updated to H4
 
 logger = logging.getLogger("currency_strength")
 logger.setLevel(logging.INFO)
@@ -50,13 +50,12 @@ def calculate_strength():
     max_rank, min_rank = 7, -7
     rank_map = {}
     for idx, (cur, _) in enumerate(sorted_scores):
-        # Round to nearest integer and force no zero
         rank = int(round(max_rank - (idx * (max_rank - min_rank) / (n - 1))))
         if rank == 0:
             rank = 1 if idx < n / 2 else -1
         rank_map[cur] = rank
 
-    # Ensure all values are integers
+    # Ensure integers
     for cur in rank_map:
         rank_map[cur] = int(rank_map[cur])
 
@@ -104,7 +103,7 @@ def run_currency_strength_alert(last_trade_alert_times: dict = None):
                 logger.info("✅ Sent full currency strength alert")
                 _last_strength_alert_time = now_ts
 
-            # Filter for strong/weak currencies
+            # Filter strong/weak currencies
             filtered_currencies = {cur: int(val) for cur, val in rank_map.items() if abs(val) >= 5}
 
             # Determine top candidate pair
@@ -123,21 +122,18 @@ def run_currency_strength_alert(last_trade_alert_times: dict = None):
                     if not strength_filter(strong_val, weak_val):
                         continue
 
-                    # H1 breakout confirmation
-                    candles_h1 = get_recent_candles(pair, "H1", 50)
-                    if not candles_h1:
-                        continue
-                    breakout_info = check_breakout_h1(pair, candles_h1, rank_map)
+                    # ---------------- H4 breakout confirmation ----------------
+                    breakout_info = check_breakout_h4(pair)
                     if not breakout_info:
                         continue
 
                     candidate_pairs.append((abs(strong_val - weak_val), pair, base_val, quote_val))
 
-                # Trigger only the top candidate
+                # Trigger only top candidate
                 candidate_pairs.sort(reverse=True, key=lambda x: x[0])
                 if candidate_pairs:
                     _, pair, base_val, quote_val = candidate_pairs[0]
-                    signal_type = "BUY" if base_val > 0 and quote_val < 0 else "SELL"
+                    signal_type = "BUY" if base_val > quote_val else "SELL"
                     key = (pair, "strength_alert")
                     last_pair_ts = last_trade_alert_times.get(key, 0)
                     if now_ts - last_pair_ts >= STRENGTH_ALERT_COOLDOWN:
